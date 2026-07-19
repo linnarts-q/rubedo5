@@ -1,0 +1,15 @@
+*.pyc
+__pycache__/
+*.session
+*.session-journal
+workspace/
+data/
+logs/
+*.db
+*.db-wal
+*.db-shm
+.DS_Store
+.idea/
+.venv/
+venv/
+.env
