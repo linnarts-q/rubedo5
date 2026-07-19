@@ -716,44 +716,55 @@ def take_screenshot() -> str:
         return f"Ошибка скриншота: {e}"
 
 
-_SPOTRENT_PYTHON = "/home/rubedo/spotrent/venv/bin/python"
-_SPOTRENT_LAUNCHER = "/home/rubedo/spotrent/spotrent_launcher.py"
-_SPOTRENT_CWD = "/home/rubedo/spotrent"
-
-
 def spotrent_status() -> str:
-    r = subprocess.run(["pgrep", "-f", "spotrent_launcher.py"], capture_output=True, text=True)
-    if r.returncode == 0:
-        pids = r.stdout.strip().replace("\n", ", ")
+    """SpotRent lives on the separate server (4.12), not the mini-PC —
+    checked over SSH (agent/remote.py), not local subprocess."""
+    from agent import remote
+    out = remote.run("pgrep -f spotrent_launcher.py")
+    if remote.is_error_output(out):
+        return f"Не удалось проверить статус SpotRent: {out}"
+    if out and out != "(пусто)":
+        pids = out.replace("\n", ", ")
         return f"SpotRent запущен (PID: {pids})."
     return "SpotRent не запущен."
 
 
 def spotrent_start() -> str:
-    r = subprocess.run(["pgrep", "-f", "spotrent_launcher.py"], capture_output=True, text=True)
-    if r.returncode == 0:
+    from agent import remote
+    from config import SPOTRENT_PYTHON, SPOTRENT_LAUNCHER, SPOTRENT_CWD
+    check = remote.run("pgrep -f spotrent_launcher.py")
+    if remote.is_error_output(check):
+        return f"Не удалось проверить статус SpotRent перед запуском: {check}"
+    if check and check != "(пусто)":
         return "SpotRent уже запущен."
-    try:
-        subprocess.Popen(
-            [_SPOTRENT_PYTHON, _SPOTRENT_LAUNCHER],
-            cwd=_SPOTRENT_CWD,
-            start_new_session=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        return "SpotRent запускается."
-    except Exception as e:
-        return f"Ошибка запуска SpotRent: {e}"
+    cmd = f"cd {SPOTRENT_CWD} && nohup {SPOTRENT_PYTHON} {SPOTRENT_LAUNCHER} > /dev/null 2>&1 & disown"
+    result = remote.run(cmd)
+    if remote.is_error_output(result):
+        return f"Ошибка запуска SpotRent: {result}"
+    return "SpotRent запускается."
 
 
 def spotrent_stop() -> str:
-    r = subprocess.run(["pgrep", "-f", "spotrent_launcher.py"], capture_output=True, text=True)
-    if r.returncode != 0:
+    from agent import remote
+    check = remote.run("pgrep -f spotrent_launcher.py")
+    if remote.is_error_output(check):
+        return f"Не удалось проверить статус SpotRent: {check}"
+    if not check or check == "(пусто)":
         return "SpotRent не запущен."
-    r2 = subprocess.run(["pkill", "-TERM", "-f", "spotrent_launcher.py"], capture_output=True, text=True)
-    if r2.returncode == 0:
-        return "SpotRent останавливается — лаунчер завершит дочерние процессы и выключится."
-    return f"Не удалось остановить SpotRent: {r2.stderr.strip()}"
+    result = remote.run("pkill -TERM -f spotrent_launcher.py")
+    if remote.is_error_output(result):
+        return f"Не удалось остановить SpotRent: {result}"
+    return "SpotRent останавливается — лаунчер завершит дочерние процессы и выключится."
+
+
+def server_shell(command: str) -> str:
+    """Non-sudo shell on the server (yellow zone, §1) — general escape
+    hatch for the ad hoc stuff that doesn't have its own tool (package
+    installs, checking a log file, one-off diagnostics). Always goes
+    through the approval gate like every other yellow/red tool; no
+    denylist here since it never runs without the owner's yes first."""
+    from agent import remote
+    return remote.run(command)
 
 
 # ─ Queue ─────────────────────────────────────────────────────────────────────
@@ -1050,6 +1061,7 @@ TOOLS_MAP: dict[str, callable] = {
     "system_shell": shell_exec,
     "system_sudo": run_sudo,
     "system_code": run_code,
+    "server_shell": server_shell,
     # process.*
     "process_list": list_processes,
     "process_kill": kill_process,
@@ -1153,6 +1165,15 @@ TOOLS_SCHEMA: list[dict] = [
         "name": "system_code",
         "description": "Выполнить Python-код",
         "parameters": {"type": "object", "properties": {"code": {"type": "string"}}, "required": ["code"]}}},
+    {"type": "function", "function": {
+        "name": "server_shell",
+        "description": (
+            "Выполнить shell-команду на отдельном сервере (не мини-ПК) без sudo — "
+            "например проверить лог, установить пакет, посмотреть статус. "
+            "Требует подтверждения (жёлтая зона). Для SpotRent используй "
+            "spotrent_status/start/stop, не этот инструмент."
+        ),
+        "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}}},
     {"type": "function", "function": {
         "name": "system_info",
         "description": "Состояние системы: CPU, RAM, диск, температура",

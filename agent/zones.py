@@ -44,6 +44,9 @@ _YELLOW: frozenset[str] = frozenset({
     # packages, touch arbitrary system state — too broad to trust as green.
     "system_shell",
     "system_code",
+    # Server transport (§1.2) — same reasoning as system_shell, just on
+    # the other host. spotrent_status stays green (read-only, §1).
+    "server_shell",
 })
 
 # Tools that are always red: Rubedo's own core, sudo, system-level change,

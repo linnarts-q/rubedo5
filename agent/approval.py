@@ -101,7 +101,7 @@ def preview_for(tool_name: str, args: dict) -> str:
             return _preview_file_delete(args)
         if tool_name == "process_kill":
             return _preview_process_kill(args)
-        if tool_name in ("system_shell", "system_sudo", "system_code"):
+        if tool_name in ("system_shell", "system_sudo", "system_code", "server_shell"):
             return _preview_command(tool_name, args)
     except Exception as e:
         log.debug(f"preview_for({tool_name}) failed, falling back: {e}")

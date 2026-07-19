@@ -51,6 +51,21 @@ DB_PATH = os.getenv("DB_PATH", "data/rubedo5.db")
 STOP_PHRASE = os.getenv("STOP_PHRASE", "")
 RESUME_PHRASE = os.getenv("RESUME_PHRASE", "")
 
+# Server transport (techspec §1.2) — SSH only, key-based auth, no
+# password ever. Empty by default: agent/remote.py reports "not
+# configured" rather than guessing connection details. This is the
+# yellow zone's "сервер" bullets (§1) made physically possible.
+SERVER_HOST = os.getenv("SERVER_HOST", "")
+SERVER_USER = os.getenv("SERVER_USER", "")
+SERVER_SSH_KEY = os.getenv("SERVER_SSH_KEY", "")
+
+# SpotRent (production bot, lives on the server — 4.12). Paths are on
+# the remote host, reached via agent/remote.py, not local subprocess
+# calls like rubedo4 had (that assumed co-location on the mini-PC).
+SPOTRENT_PYTHON = os.getenv("SPOTRENT_PYTHON", "/home/rubedo/spotrent/venv/bin/python")
+SPOTRENT_LAUNCHER = os.getenv("SPOTRENT_LAUNCHER", "/home/rubedo/spotrent/spotrent_launcher.py")
+SPOTRENT_CWD = os.getenv("SPOTRENT_CWD", "/home/rubedo/spotrent")
+
 # Bus
 BUS_HOST = "127.0.0.1"
 BUS_PORT = 9999
