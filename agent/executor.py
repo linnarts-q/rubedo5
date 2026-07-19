@@ -1,0 +1,220 @@
+from __future__ import annotations
+import asyncio
+import json
+import logging
+import time
+from config import (
+    EXECUTOR_EXACT_DUPLICATE_LIMIT,
+    EXECUTOR_TOOL_TIMEOUT_SEC,
+    EXECUTOR_MAX_ITER_DEFAULT,
+)
+from agent.idempotency import (
+    is_side_effect, DUPLICATE_BLOCK_MESSAGE, check_cooldown, mark_called,
+)
+from agent.audit import AuditLogger
+from agent import zones, approval
+from llm import openrouter as llm_gen
+from llm.exceptions import AllKeysExhausted
+from bus.events import ToolCalled, ToolFinished, WorkStarted, WorkCompleted, LLMExhausted
+
+log = logging.getLogger("rubedo.executor")
+
+EXACT_DUPLICATE_LIMIT = EXECUTOR_EXACT_DUPLICATE_LIMIT
+_TOOL_TIMEOUT = float(EXECUTOR_TOOL_TIMEOUT_SEC)
+
+
+async def run(
+    messages: list,
+    tools_schema: list,
+    tools_map: dict,
+    session_id: str,
+    bus_client,
+    max_iterations: int = EXECUTOR_MAX_ITER_DEFAULT,
+    audit: AuditLogger | None = None,
+) -> tuple[str, list]:
+    """OpenAI-compatible tool loop. Returns (final_reply, updated_messages).
+
+    Before a yellow/red-zone tool call (techspec §1, agent/zones.py) is
+    ever executed, the loop halts and hands back a confirmation question
+    as this turn's reply instead — agent/approval.py stores the pending
+    call; agent/controller.py intercepts the owner's next message to
+    either run it for real or cancel it. Only GREEN tools run inline
+    here, same as every tool did before this stage.
+    """
+    history = list(messages)
+    tool_counts: dict[str, int] = {}
+    exact_counts: dict[str, int] = {}
+    first_tool = True
+
+    for _ in range(max_iterations):
+        if audit:
+            audit.llm_request(message_count=len(history), has_tools=True)
+        try:
+            response = await llm_gen.chat(history, tools=tools_schema)
+        except AllKeysExhausted:
+            await bus_client.publish(LLMExhausted(session_id=session_id))
+            raise
+        except Exception as _e:
+            if "maximum context length" in str(_e) or "context_length_exceeded" in str(_e):
+                # Trim oldest non-system tool messages and retry once
+                trimmed = [m for m in history if m.get("role") == "system"]
+                non_sys = [m for m in history if m.get("role") != "system"]
+                non_sys = non_sys[max(0, len(non_sys) - 6):]
+                history = trimmed + non_sys
+                if audit:
+                    audit.exception("executor.context_trim", str(_e)[:120])
+                try:
+                    response = await llm_gen.chat(history, tools=tools_schema)
+                except Exception as _e2:
+                    raise _e2
+            else:
+                raise
+
+        msg = response.choices[0].message
+        if audit:
+            audit.llm_response(
+                content=msg.content,
+                tool_call_count=len(msg.tool_calls or []),
+            )
+
+        if not msg.tool_calls:
+            reply = msg.content or ""
+            if audit:
+                audit.final_reply(reply)
+            return reply, history
+
+        asst: dict = {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+                }
+                for tc in msg.tool_calls
+            ],
+        }
+        if msg.content:
+            asst["content"] = msg.content
+        history.append(asst)
+
+        if first_tool:
+            await bus_client.publish(WorkStarted(session_id=session_id))
+            first_tool = False
+
+        for tc in msg.tool_calls:
+            name = tc.function.name
+            try:
+                args = json.loads(tc.function.arguments or "{}")
+            except json.JSONDecodeError:
+                args = {}
+                log.warning(f"Tool '{name}': malformed args JSON, using empty dict")
+
+            zone = zones.resolve_zone(name, args)
+            if zone is not zones.Zone.GREEN:
+                preview = approval.preview_for(name, args)
+                approval.request(name, args, preview)
+                await bus_client.publish(ToolCalled(name=name, args_preview=str(args)[:120]))
+                if audit:
+                    audit.tool_called(name=name, args=args)
+                reply = (
+                    f"Нужно подтверждение ({zone.value}-зона):\n{preview}\n\n"
+                    "Выполнять? (да/нет)"
+                )
+                if audit:
+                    audit.final_reply(reply)
+                await bus_client.publish(WorkCompleted(session_id=session_id))
+                return reply, history
+
+            exact_key = f"{name}:{json.dumps(args, sort_keys=True)}"
+            exact_counts[exact_key] = exact_counts.get(exact_key, 0) + 1
+            tool_counts[name] = tool_counts.get(name, 0) + 1
+
+            if exact_counts[exact_key] >= EXACT_DUPLICATE_LIMIT:
+                log.warning(f"Loop detected: '{name}' called with identical args twice")
+                if audit:
+                    audit.loop_detected(name=name, args=args)
+                history.append(
+                    {"role": "tool", "tool_call_id": tc.id, "content": "Обнаружена петля, останавливаю."}
+                )
+                await bus_client.publish(WorkCompleted(session_id=session_id))
+                reply = "Обнаружила, что хожу по кругу, остановилась."
+                if audit:
+                    audit.final_reply(reply)
+                return reply, history
+
+            await bus_client.publish(ToolCalled(name=name, args_preview=str(args)[:120]))
+            if audit:
+                audit.tool_called(name=name, args=args)
+
+            if is_side_effect(name) and exact_counts[exact_key] > 1:
+                log.warning(
+                    f"Idempotency block: '{name}' already called this turn with same args"
+                )
+                result = DUPLICATE_BLOCK_MESSAGE
+                success = True
+                await bus_client.publish(ToolFinished(name=name, success=success))
+                if audit:
+                    audit.idempotency_block(name=name, args=args)
+                    audit.tool_finished(name=name, result=result, success=success, duration_ms=0)
+                history.append({"role": "tool", "tool_call_id": tc.id, "content": str(result)})
+                continue
+
+            blocked, cooldown_msg = check_cooldown(name)
+            if blocked:
+                log.warning(f"Cooldown block: '{name}' — {cooldown_msg}")
+                result = cooldown_msg or DUPLICATE_BLOCK_MESSAGE
+                success = True
+                await bus_client.publish(ToolFinished(name=name, success=success))
+                if audit:
+                    audit.idempotency_block(name=name, args=args)
+                    audit.tool_finished(name=name, result=result, success=success, duration_ms=0)
+                history.append({"role": "tool", "tool_call_id": tc.id, "content": str(result)})
+                continue
+
+            fn = tools_map.get(name)
+            t_start = time.monotonic()
+            if fn is None:
+                result = f"Инструмент '{name}' не найден."
+                success = False
+            else:
+                try:
+                    coro = (
+                        fn(**args)
+                        if asyncio.iscoroutinefunction(fn)
+                        else asyncio.to_thread(fn, **args)
+                    )
+                    result = await asyncio.wait_for(coro, timeout=_TOOL_TIMEOUT)
+                    success = True
+                except asyncio.TimeoutError:
+                    result = f"Инструмент '{name}' превысил лимит времени ({_TOOL_TIMEOUT:.0f}с)."
+                    success = False
+                    log.warning(f"Tool '{name}' timed out after {_TOOL_TIMEOUT}s")
+                except Exception as e:
+                    result = f"Ошибка: {e}"
+                    success = False
+                    log.error(f"Tool '{name}' error: {e}", exc_info=True)
+
+            duration_ms = int((time.monotonic() - t_start) * 1000)
+            if success:
+                mark_called(name)
+            await bus_client.publish(ToolFinished(name=name, success=success))
+            if audit:
+                audit.tool_finished(
+                    name=name, result=str(result), success=success, duration_ms=duration_ms,
+                )
+            history.append({"role": "tool", "tool_call_id": tc.id, "content": str(result)})
+
+    await bus_client.publish(WorkCompleted(session_id=session_id))
+    try:
+        final = await llm_gen.chat(history)
+        reply = final.choices[0].message.content or "Готово."
+        if audit:
+            audit.final_reply(reply)
+        return reply, history
+    except AllKeysExhausted:
+        raise
+    except Exception as e:
+        if audit:
+            audit.exception("executor.final_chat", str(e))
+        return "Исчерпала лимит шагов.", history
