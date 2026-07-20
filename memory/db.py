@@ -181,8 +181,16 @@ def init_db():
                 checkin_mode TEXT DEFAULT 'normal',
                 notes TEXT DEFAULT '',
                 is_dayoff INTEGER DEFAULT 0,
-                weekly_plan_done INTEGER DEFAULT 0
+                weekly_plan_done INTEGER DEFAULT 0,
+                wake_time TEXT,
+                briefing_time TEXT,
+                wrapup_time TEXT,
+                lunch_time TEXT
             );
+            ALTER TABLE day_state ADD COLUMN IF NOT EXISTS wake_time TEXT;
+            ALTER TABLE day_state ADD COLUMN IF NOT EXISTS briefing_time TEXT;
+            ALTER TABLE day_state ADD COLUMN IF NOT EXISTS wrapup_time TEXT;
+            ALTER TABLE day_state ADD COLUMN IF NOT EXISTS lunch_time TEXT;
             CREATE TABLE IF NOT EXISTS day_tasks (
                 id SERIAL PRIMARY KEY,
                 date TEXT NOT NULL,

@@ -357,3 +357,38 @@ def mark_tick(key: str) -> None:
     """Record current timestamp for the given tick key."""
     from memory.db import save_meta
     save_meta(key, datetime.now().isoformat())
+
+
+# ─ Negotiated anchor times (§2/§5, day-engine 5.0 responsibility 2) ────
+# Per-date, unlike day_phase_state — each day's anchor times genuinely
+# belong to that calendar date, negotiated the evening before via the
+# hanging-question mechanic (agent/anchors.py). NULL means "not yet
+# negotiated for this date" — distinct from "negotiated to no time" for
+# the optional lunch/break anchor, which simply may never be set.
+
+_ANCHOR_COLS = ("wake_time", "briefing_time", "wrapup_time", "lunch_time")
+
+
+def get_anchor_times(for_date: str) -> dict:
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT wake_time, briefing_time, wrapup_time, lunch_time "
+            "FROM day_state WHERE date=%s",
+            (for_date,),
+        ).fetchone()
+    return {c: (row[c] if row else None) for c in _ANCHOR_COLS}
+
+
+def set_anchor_times(for_date: str, **times: str | None) -> None:
+    """Keyword-only: pass only the anchors you want to set
+    (wake_time=, briefing_time=, wrapup_time=, lunch_time=) — omitted
+    ones are left untouched, not reset to NULL."""
+    cols = [c for c in _ANCHOR_COLS if c in times]
+    if not cols:
+        return
+    with _conn() as conn:
+        conn.execute(
+            f"INSERT INTO day_state(date, {', '.join(cols)}) VALUES(%s, {', '.join(['%s'] * len(cols))}) "
+            f"ON CONFLICT (date) DO UPDATE SET {', '.join(f'{c}=excluded.{c}' for c in cols)}",
+            (for_date, *[times[c] for c in cols]),
+        )

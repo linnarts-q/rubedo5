@@ -17,7 +17,7 @@ from agent.executor import run as executor_run
 from agent.audit import AuditLogger, check_normal_threshold, NORMAL_DIR
 from agent.prompts import build_gpt_system, build_analytics_system
 from agent.tools import TOOLS_SCHEMA, TOOLS_MAP, set_context
-from agent import approval, stopword, outcomes, sessions, questions
+from agent import approval, stopword, outcomes, sessions, questions, anchors
 from agent.reflect import reflect_on_failure
 from agent.verify import find_unacknowledged_failures
 from agent.tool_categories import get_tools_for_categories
@@ -268,6 +268,19 @@ async def handle_message(
             reply = "Что-то пошло не так, попробуй ещё раз."
             sessions.fail(_tsid_q, f"{type(e).__name__}: {e}")
             log.exception(f"Session-resume error [{type(e).__name__}]: {e}")
+        await send_fn(reply)
+        save_message(session_id, "assistant", reply)
+        await bus_client.publish(AgentReplied(session_id=session_id))
+        return
+
+    # Intercept an anchor-time negotiation reply (§2/§5, day-engine 5.0
+    # responsibility 2) — the owner confirming or correcting tomorrow's
+    # proposed wake/briefing/wrapup times. TTL/expiry handling lives in
+    # agent/hanging.py, same as approval and ask_user.
+    if anchors.pending():
+        if not skip_save_user:
+            save_message(session_id, "user", text)
+        reply = anchors.resolve_reply(text)
         await send_fn(reply)
         save_message(session_id, "assistant", reply)
         await bus_client.publish(AgentReplied(session_id=session_id))
