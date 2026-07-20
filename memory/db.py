@@ -323,6 +323,16 @@ def init_db():
                 phase TEXT NOT NULL DEFAULT 'night',
                 entered_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS notification_bundle (
+                id SERIAL PRIMARY KEY,
+                severity TEXT NOT NULL,
+                content TEXT NOT NULL,
+                source TEXT DEFAULT '',
+                created_at TEXT NOT NULL,
+                delivered_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS notification_bundle_pending_idx
+                ON notification_bundle (delivered_at);
         """)
 
 
@@ -1196,4 +1206,40 @@ def set_day_phase(phase: str, entered_at: str) -> None:
         conn.execute(
             "UPDATE day_phase_state SET phase=%s, entered_at=%s WHERE id=1",
             (phase, entered_at),
+        )
+
+
+# ─ Notification bundle (§7, day-engine 5.0 responsibility 3) ──────────
+# Where a non-critical notification lands when the current delivery
+# policy (agent/notify.py) says "not now" — accumulated here instead of
+# lost, ready for a briefing (once that content-generation piece
+# exists) to flush.
+
+def save_bundled_notification(severity: str, content: str, source: str = "") -> int:
+    now = _now()
+    with get_conn() as conn:
+        row = conn.execute(
+            "INSERT INTO notification_bundle (severity, content, source, created_at) "
+            "VALUES (%s,%s,%s,%s) RETURNING id",
+            (severity, content, source, now),
+        ).fetchone()
+        return row["id"]
+
+
+def list_pending_bundle() -> list[dict]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM notification_bundle WHERE delivered_at IS NULL ORDER BY id ASC"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def mark_bundle_delivered(ids: list[int]) -> None:
+    if not ids:
+        return
+    now = _now()
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE notification_bundle SET delivered_at=%s WHERE id = ANY(%s)",
+            (now, ids),
         )

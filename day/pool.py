@@ -192,18 +192,15 @@ async def run_tick(tg_client, owner_id: int) -> None:
     from agent import notify
 
     now = datetime.now()
-    if not notify.should_notify("low", quiet_start=POOL_QUIET_START, quiet_end=POOL_QUIET_END):
-        return
     if _today_nudge_count(now) >= POOL_MAX_NUDGES_PER_DAY:
         return
 
+    # Day-off used to be special-cased here by hand (filter by priority
+    # threshold) — that's exactly the bespoke suppression logic the
+    # day-engine plan calls out for deletion. Now it's just one more
+    # input to the shared severity policy below (agent/notify.py),
+    # applied uniformly to whatever nudge text ends up generated.
     due = get_due()
-
-    from day.state import get_today_state
-    state = get_today_state()
-    if state and state.get("is_dayoff"):
-        due = [t for t in due if int(t.get("priority") or 3) >= 3]
-
     primary_candidates = [t for t in due if int(t.get("priority") or 3) <= 3]
     if not primary_candidates:
         return
@@ -217,11 +214,20 @@ async def run_tick(tg_client, owner_id: int) -> None:
         log.warning(f"nudge gen failed for #{primary['id']}: {e}")
         text = f"Напоминаю про задачу: «{primary['title']}»."
 
+    deliver_now = notify.notify_or_bundle(
+        "low", text, source="pool",
+        quiet_start=POOL_QUIET_START, quiet_end=POOL_QUIET_END,
+    )
+    mark_nudged(primary["id"])
+    for t in piggyback:
+        mark_nudged(t["id"])
+
+    if not deliver_now:
+        log.info(f"pool nudge for #{primary['id']} bundled (policy restricted), not sent now")
+        return
+
     try:
         await tg_client.send_message(owner_id, text)
-        mark_nudged(primary["id"])
-        for t in piggyback:
-            mark_nudged(t["id"])
         log.info(
             f"pool nudge: primary #{primary['id']}"
             + (f", piggyback {[t['id'] for t in piggyback]}" if piggyback else "")
