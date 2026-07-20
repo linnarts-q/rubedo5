@@ -100,16 +100,20 @@ async def generate_wrapup_text() -> str:
         return "Не получилось собрать итог дня словами, но день завершён."
 
 
-async def run_wrapup() -> str:
-    """Generate and deliver the wrapup, then confirm the day -> evening
-    transition immediately if nothing needs verifying. Returns the
-    generated text (delivered now or bundled, per agent/notify.py)."""
+async def run_wrapup(send_fn=None) -> str:
+    """Generate the wrapup and, if agent/notify.py's policy says now is
+    an OK time, actually deliver it via `send_fn` — otherwise it's
+    bundled instead (same "send only if notify_or_bundle says so"
+    contract day/pool.py's run_tick already follows). Then confirms the
+    day -> evening transition immediately if nothing needs verifying.
+    Returns the generated text regardless of whether it was sent."""
     import day.phase as phase
     from day.state import get_unverified_today, set_wrapup_done
     from agent import notify
 
     text = await generate_wrapup_text()
-    notify.notify_or_bundle("normal", text, source="wrapup")
+    if notify.notify_or_bundle("normal", text, source="wrapup") and send_fn:
+        await send_fn(text)
     set_wrapup_done(True)
 
     if not get_unverified_today():

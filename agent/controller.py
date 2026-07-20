@@ -169,6 +169,16 @@ async def handle_message(
     _session_started.add(session_id)
     dt = now_local().strftime("%d.%m.%Y %H:%M")
 
+    # Wake-up confirmation (§16) — any message while phase is "night"
+    # and the wake alarm has already fired (day/tick.py) counts as "the
+    # reaction" that confirms night -> morning. Augments normal message
+    # handling as a side effect, never short-circuits it — the owner's
+    # first message of the day is still processed normally below.
+    import day.phase as _phase
+    if _phase.current() == "night":
+        if load_meta(f"wake_alarm_fired_{now_local().date().isoformat()}") == "1":
+            _phase.on_wake_confirmed()
+
     # Stop-phrase (techspec §15) — plain string comparison, before any
     # LLM call of any kind, so it still works if the models are down or
     # looping. Checked before the audit logger even sees this turn.
@@ -387,6 +397,12 @@ async def handle_message(
             save_message(session_id, "user", text)
         await bus_client.publish(AgentReplied(session_id=session_id))
         return
+
+    # First substantive message of the day (§16) — morning -> day.
+    # A "deep" task session starting is covered too: it only ever
+    # follows a real message reaching this point, so one hook here
+    # covers both triggers the plan names without duplicating logic.
+    _phase.on_first_activity()
 
     ctx_history = load_history(session_id, limit=6)
     route_info = await classify(text, history=ctx_history)

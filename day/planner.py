@@ -92,16 +92,19 @@ async def generate_briefing_text() -> str:
         return "Доброе утро — не получилось собрать брифинг словами, но день начался."
 
 
-async def run_briefing() -> str:
-    """Generate and deliver the morning briefing. Doesn't touch phase
-    itself — the night -> morning transition is on_wake_confirmed()
-    (agent/phase.py), a separate event this doesn't fire; the briefing
-    is content delivered once that phase is already active."""
+async def run_briefing(send_fn=None) -> str:
+    """Generate the briefing and, if agent/notify.py's policy says now
+    is an OK time, actually deliver it via `send_fn` — otherwise it's
+    bundled instead. Doesn't touch phase itself — the night -> morning
+    transition is on_wake_confirmed() (day/phase.py), a separate event
+    this doesn't fire; the briefing is content delivered once that
+    phase is already active."""
     from agent import notify
     from day.state import set_briefing_done
 
     text = await generate_briefing_text()
-    notify.notify_or_bundle("normal", text, source="briefing")
+    if notify.notify_or_bundle("normal", text, source="briefing") and send_fn:
+        await send_fn(text)
     set_briefing_done(True)
     return text
 
