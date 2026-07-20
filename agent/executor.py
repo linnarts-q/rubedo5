@@ -12,7 +12,7 @@ from agent.idempotency import (
     is_side_effect, DUPLICATE_BLOCK_MESSAGE, check_cooldown, mark_called,
 )
 from agent.audit import AuditLogger
-from agent import zones, approval
+from agent import zones, approval, sessions, questions
 from llm import openrouter as llm_gen
 from llm.exceptions import AllKeysExhausted
 from bus.events import ToolCalled, ToolFinished, WorkStarted, WorkCompleted, LLMExhausted
@@ -33,6 +33,8 @@ async def run(
     audit: AuditLogger | None = None,
     full_tools_schema: list | None = None,
     full_tools_map: dict | None = None,
+    task_session_id: int | None = None,
+    tool_categories: list[str] | None = None,
 ) -> tuple[str, list]:
     """OpenAI-compatible tool loop. Returns (final_reply, updated_messages).
 
@@ -51,6 +53,15 @@ async def run(
     failing outright. Lighter interim version of the spec's "one
     follow-up category request, then honest refusal"; the fuller
     version needs the reflective cycle (§3), a later stage.
+
+    `task_session_id` (§2 phase 1) — if the caller opened a task session
+    for this run (agent/controller.py, route == "deep"), every tool call
+    and its outcome is appended to that session's decision journal, and
+    the session is completed/failed/paused as the loop resolves. `None`
+    means "no session for this turn" — every session.* call below is a
+    no-op in that case, so plain "simple" turns pay nothing extra.
+    `tool_categories` is only needed alongside `task_session_id`, so an
+    `ask_user` pause can be resumed later with the same tool set.
     """
     history = list(messages)
     tool_counts: dict[str, int] = {}
@@ -93,6 +104,7 @@ async def run(
             reply = msg.content or ""
             if audit:
                 audit.final_reply(reply)
+            sessions.complete(task_session_id, result=reply[:300])
             return reply, history
 
         asst: dict = {
@@ -122,10 +134,35 @@ async def run(
                 args = {}
                 log.warning(f"Tool '{name}': malformed args JSON, using empty dict")
 
+            # ask_user (§2 phase 1) — halts the loop like a yellow/red
+            # zone call does, but for a free-text question rather than a
+            # yes/no. Only meaningful with a task session to pause and
+            # resume; without one there's nothing to come back to, so it
+            # degrades to answering inline like any other green tool.
+            if name == "ask_user" and task_session_id is not None:
+                question = str(args.get("question", "")).strip() or "Уточни, пожалуйста."
+                history.append({
+                    "role": "tool", "tool_call_id": tc.id,
+                    "content": "Ожидаю ответ пользователя...",
+                })
+                await bus_client.publish(ToolCalled(name=name, args_preview=str(args)[:120]))
+                if audit:
+                    audit.tool_called(name=name, args=args)
+                sessions.pause(task_session_id, reason=question)
+                sessions.log_decision(task_session_id, "ask_user", question)
+                questions.ask(
+                    task_session_id, question, history,
+                    tool_categories or [], max_iterations,
+                )
+                if audit:
+                    audit.final_reply(question)
+                await bus_client.publish(WorkCompleted(session_id=session_id))
+                return question, history
+
             zone = zones.resolve_zone(name, args)
             if zone is not zones.Zone.GREEN:
                 preview = approval.preview_for(name, args)
-                approval.request(name, args, preview)
+                approval.request(name, args, preview, task_session_id=task_session_id)
                 await bus_client.publish(ToolCalled(name=name, args_preview=str(args)[:120]))
                 if audit:
                     audit.tool_called(name=name, args=args)
@@ -135,6 +172,8 @@ async def run(
                 )
                 if audit:
                     audit.final_reply(reply)
+                sessions.pause(task_session_id, reason=preview)
+                sessions.log_decision(task_session_id, "approval_pending", preview)
                 await bus_client.publish(WorkCompleted(session_id=session_id))
                 return reply, history
 
@@ -153,6 +192,7 @@ async def run(
                 reply = "Обнаружила, что хожу по кругу, остановилась."
                 if audit:
                     audit.final_reply(reply)
+                sessions.fail(task_session_id, "обнаружена петля (повторяющийся вызов инструмента)")
                 return reply, history
 
             await bus_client.publish(ToolCalled(name=name, args_preview=str(args)[:120]))
@@ -226,6 +266,10 @@ async def run(
                     name=name, result=str(result), success=success, duration_ms=duration_ms,
                 )
             history.append({"role": "tool", "tool_call_id": tc.id, "content": str(result)})
+            sessions.log_decision(
+                task_session_id, "tool_call",
+                f"{name}({json.dumps(args, ensure_ascii=False)}) -> {str(result)[:200]}",
+            )
 
     await bus_client.publish(WorkCompleted(session_id=session_id))
     try:
@@ -233,10 +277,12 @@ async def run(
         reply = final.choices[0].message.content or "Готово."
         if audit:
             audit.final_reply(reply)
+        sessions.complete(task_session_id, result=reply[:300])
         return reply, history
     except AllKeysExhausted:
         raise
     except Exception as e:
         if audit:
             audit.exception("executor.final_chat", str(e))
+        sessions.fail(task_session_id, "исчерпан лимит шагов")
         return "Исчерпала лимит шагов.", history

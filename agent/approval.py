@@ -38,10 +38,18 @@ _NO_WORDS = {
 }
 
 
-def request(name: str, args: dict, preview: str) -> None:
-    """Store a pending tool call awaiting the owner's yes/no."""
+def request(name: str, args: dict, preview: str, task_session_id: int | None = None) -> None:
+    """Store a pending tool call awaiting the owner's yes/no.
+
+    `task_session_id` (§2 phase 1) — if this call halted a task session
+    (agent/executor.py), carrying its id through lets
+    agent/controller.py resume and then complete/cancel that same
+    session once the owner answers, instead of leaving it paused
+    forever with no way back."""
     from memory.db import save_meta
-    save_meta(_META_PENDING, json.dumps({"name": name, "args": args, "preview": preview}))
+    save_meta(_META_PENDING, json.dumps({
+        "name": name, "args": args, "preview": preview, "task_session_id": task_session_id,
+    }))
     save_meta(_META_ARMED_AT, datetime.now().isoformat())
 
 
@@ -61,6 +69,7 @@ def pending() -> dict | None:
         return None
     if (datetime.now() - armed_dt).total_seconds() > APPROVAL_TTL_HOURS * 3600:
         log.info("Pending approval expired (TTL), clearing")
+        _fail_orphaned_session(raw)
         clear()
         return None
     try:
@@ -68,6 +77,21 @@ def pending() -> dict | None:
     except Exception:
         clear()
         return None
+
+
+def _fail_orphaned_session(raw: str) -> None:
+    """A paused task session (§2 phase 1) whose approval went stale has
+    nothing left to wait for — mark it failed rather than leaving it
+    'paused' forever with no way back in. Best-effort: a malformed or
+    session-less payload is silently ignored, same as the surrounding
+    TTL-eviction paths."""
+    try:
+        tsid = json.loads(raw).get("task_session_id")
+        if tsid is not None:
+            from agent import sessions
+            sessions.fail(tsid, "подтверждение просрочено (TTL)")
+    except Exception as e:
+        log.debug(f"orphaned-session fail skipped: {e}")
 
 
 def clear() -> None:

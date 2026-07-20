@@ -17,7 +17,7 @@ from agent.executor import run as executor_run
 from agent.audit import AuditLogger, check_normal_threshold, NORMAL_DIR
 from agent.prompts import build_gpt_system, build_analytics_system
 from agent.tools import TOOLS_SCHEMA, TOOLS_MAP, set_context
-from agent import approval, stopword, outcomes
+from agent import approval, stopword, outcomes, sessions, questions
 from agent.tool_categories import get_tools_for_categories
 from memory.db import (
     load_history, save_message, load_facts, search_events,
@@ -200,13 +200,19 @@ async def handle_message(
     # else falls through to the normal flow and leaves it pending.
     _pending = approval.pending()
     if _pending:
+        _tsid = _pending.get("task_session_id")
         confirmed = approval.is_confirmation(text)
         if confirmed is True:
             approval.clear()
             if not skip_save_user:
                 save_message(session_id, "user", text)
+            sessions.resume(_tsid)
             result = await _run_approved_tool(_pending["name"], _pending["args"])
             reply = result
+            if str(result).startswith("Ошибка"):
+                sessions.fail(_tsid, result)
+            else:
+                sessions.complete(_tsid, result=str(result)[:300])
             await send_fn(reply)
             save_message(session_id, "assistant", reply)
             await bus_client.publish(AgentReplied(session_id=session_id))
@@ -215,6 +221,8 @@ async def handle_message(
             approval.clear()
             if not skip_save_user:
                 save_message(session_id, "user", text)
+            sessions.resume(_tsid)
+            sessions.cancel(_tsid, reason="владелец отменил подтверждение")
             reply = "Отменила, не выполняю."
             await send_fn(reply)
             save_message(session_id, "assistant", reply)
@@ -223,6 +231,44 @@ async def handle_message(
         # Not a recognizable yes/no — leave it pending, handle this
         # message normally (owner may be asking something about it, or
         # about something else entirely).
+
+    # Intercept a session question answer (§2 phase 1, `ask_user` tool)
+    # — a task session paused mid-reasoning waiting on a free-text
+    # answer. Resuming means continuing the SAME executor run with the
+    # owner's answer appended, not starting a fresh turn from scratch —
+    # that's the whole point of carrying the in-flight history through
+    # agent/questions.py rather than just re-asking from zero.
+    _pending_q = questions.pending()
+    if _pending_q:
+        questions.clear()
+        if not skip_save_user:
+            save_message(session_id, "user", text)
+        _tsid_q = _pending_q["session_id"]
+        sessions.resume(_tsid_q)
+        sessions.log_decision(_tsid_q, "answer", text)
+        resumed_history = _pending_q["history"] + [{"role": "user", "content": text}]
+        _cats_q = _pending_q.get("tool_categories", [])
+        tools_schema, tools_map = get_tools_for_categories(_cats_q)
+        try:
+            reply, _ = await executor_run(
+                resumed_history, tools_schema, tools_map, session_id, bus_client,
+                _pending_q.get("max_iter", EXECUTOR_MAX_ITER_DEFAULT),
+                audit=audit,
+                full_tools_schema=TOOLS_SCHEMA, full_tools_map=TOOLS_MAP,
+                task_session_id=_tsid_q, tool_categories=_cats_q,
+            )
+            reply = _clean_reply(reply)
+        except AllKeysExhausted:
+            reply = "Все API-ключи на лимите, попробуй позже."
+            sessions.fail(_tsid_q, "AllKeysExhausted")
+        except Exception as e:
+            reply = "Что-то пошло не так, попробуй ещё раз."
+            sessions.fail(_tsid_q, f"{type(e).__name__}: {e}")
+            log.exception(f"Session-resume error [{type(e).__name__}]: {e}")
+        await send_fn(reply)
+        save_message(session_id, "assistant", reply)
+        await bus_client.publish(AgentReplied(session_id=session_id))
+        return
 
     # Intercept wrapup plan response (TTL 20h — covers wrapup-at-23:00
     # plus reply any time before next-day evening). Briefing intentionally
@@ -424,6 +470,7 @@ async def handle_message(
 
     plan_text = ""
     max_iter = _ROUTE_MAX_ITER.get(route, 8)
+    task_session_id = None
 
     if route == "deep":
         plan = await make_plan(intent, list(TOOLS_MAP.keys()))
@@ -433,6 +480,13 @@ async def handle_message(
             plan_text = "План:\n" + "\n".join(f"{i + 1}. {s}" for i, s in enumerate(steps))
         if len(steps) >= 2:
             await send_fn("Приступаю к задаче — это займёт немного времени.")
+        # Task session (§2 phase 1) — only "deep", multi-step work gets
+        # one; "simple" tool turns and pure chat stay unsessioned by
+        # design (see agent/sessions.py docstring).
+        _tsess = sessions.start(intent or text, origin="chat")
+        task_session_id = _tsess["id"]
+        if steps:
+            sessions.log_decision(task_session_id, "plan", plan_text)
 
     if _first_after_restart:
         last_time = get_last_message_time(session_id)
@@ -475,25 +529,29 @@ async def handle_message(
     # categories (§13) load, with the full set kept on hand so the
     # executor can widen if the model names a real tool outside them.
     _no_tools = _frozen or context_type in ("chat", "emotional")
+    _tool_cats = route_info.get("tool_categories", [])
     if _no_tools:
         tools_schema, tools_map = [], {}
     else:
-        tools_schema, tools_map = get_tools_for_categories(route_info.get("tool_categories", []))
+        tools_schema, tools_map = get_tools_for_categories(_tool_cats)
 
     try:
         reply, _ = await executor_run(
             messages, tools_schema, tools_map, session_id, bus_client, max_iter,
             audit=audit,
             full_tools_schema=TOOLS_SCHEMA, full_tools_map=TOOLS_MAP,
+            task_session_id=task_session_id, tool_categories=_tool_cats,
         )
         reply = _clean_reply(reply)
     except AllKeysExhausted:
         reply = "Все API-ключи на лимите, попробуй позже."
         audit.exception("controller.handle_message", "AllKeysExhausted")
+        sessions.fail(task_session_id, "AllKeysExhausted")
         log.error("All LLM keys exhausted")
     except Exception as e:
         reply = "Что-то пошло не так, попробуй ещё раз."
         audit.exception("controller.handle_message", f"{type(e).__name__}: {e}")
+        sessions.fail(task_session_id, f"{type(e).__name__}: {e}")
         await bus_client.publish(AgentError(session_id=session_id, error=str(e)))
         log.exception(f"Agent error [{type(e).__name__}]: {e}")
 

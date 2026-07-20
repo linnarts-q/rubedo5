@@ -32,6 +32,9 @@ from agent.tools.shell import (  # noqa: E402  (re-export)
     shell_exec, run_sudo, run_code,
     list_processes, kill_process, launch_app,
 )
+from agent.tools.sessions import (  # noqa: E402  (re-export)
+    plan, report, ask_user, session_history,
+)
 
 log = logging.getLogger("rubedo.tools")
 
@@ -1015,6 +1018,13 @@ def rollback_last_change() -> str:
 
 TOOLS_MAP: dict[str, callable] = {
     "think": think,
+    # session.* (§2 phase 1 — plan/report write to the active session's
+    # decision journal; ask_user is special-cased in agent/executor.py
+    # and halts the loop before this body would ever run)
+    "session_plan": plan,
+    "session_report": report,
+    "ask_user": ask_user,
+    "session_history": session_history,
     # memory.*
     "memory_save": remember,
     "memory_search": memory_search,
@@ -1130,6 +1140,22 @@ TOOLS_SCHEMA: list[dict] = [
         "name": "think",
         "description": "Внутренний монолог — обдумать перед действием",
         "parameters": {"type": "object", "properties": {"thought": {"type": "string"}}, "required": ["thought"]}}},
+    {"type": "function", "function": {
+        "name": "session_plan",
+        "description": "Записать/обновить план шагов для текущей задачи (если она достаточно сложная и многошаговая). Нет активной сессии — ничего страшного, просто не сохранится",
+        "parameters": {"type": "object", "properties": {"steps": {"type": "array", "items": {"type": "string"}}}, "required": ["steps"]}}},
+    {"type": "function", "function": {
+        "name": "session_report",
+        "description": "Оставить заметку в журнале текущей задачи — что обнаружено, что пошло не так, промежуточный итог",
+        "parameters": {"type": "object", "properties": {"update": {"type": "string"}}, "required": ["update"]}}},
+    {"type": "function", "function": {
+        "name": "ask_user",
+        "description": "Задать хозяину уточняющий вопрос посреди выполнения задачи и дождаться ответа, не теряя контекст",
+        "parameters": {"type": "object", "properties": {"question": {"type": "string"}}, "required": ["question"]}}},
+    {"type": "function", "function": {
+        "name": "session_history",
+        "description": "Посмотреть список последних сессий задач или журнал решений конкретной сессии по id",
+        "parameters": {"type": "object", "properties": {"session_id": {"type": "integer", "default": 0}, "limit": {"type": "integer", "default": 10}}, "required": []}}},
     {"type": "function", "function": {
         "name": "memory_save",
         "description": "Сохранить событие или важную информацию в долгосрочную память",

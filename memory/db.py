@@ -283,6 +283,28 @@ def init_db():
                 secret_encrypted BYTEA NOT NULL,
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS task_sessions (
+                id SERIAL PRIMARY KEY,
+                title TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                origin TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                paused_at TEXT,
+                resumed_at TEXT,
+                completed_at TEXT,
+                result TEXT,
+                error TEXT
+            );
+            CREATE INDEX IF NOT EXISTS task_sessions_status_idx ON task_sessions (status);
+            CREATE TABLE IF NOT EXISTS session_decisions (
+                id SERIAL PRIMARY KEY,
+                session_id INTEGER NOT NULL REFERENCES task_sessions(id) ON DELETE CASCADE,
+                kind TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS session_decisions_session_idx ON session_decisions (session_id, id);
         """)
 
 
@@ -970,3 +992,97 @@ def profile_get_all(entity: str) -> dict[str, str]:
             "SELECT key, value FROM profiles WHERE entity=%s ORDER BY key ASC", (entity,)
         ).fetchall()
     return {r["key"]: r["value"] for r in rows}
+
+
+# ─ Task sessions (techspec §2, phase 1: pause/sequential + decision journal) ─
+
+def session_create(title: str, origin: str | None = None) -> int:
+    now = _now()
+    with get_conn() as conn:
+        row = conn.execute(
+            "INSERT INTO task_sessions (title, status, origin, created_at, updated_at) "
+            "VALUES (%s, 'active', %s, %s, %s) RETURNING id",
+            (title, origin, now, now),
+        ).fetchone()
+        return row["id"]
+
+
+def session_get(session_id: int) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM task_sessions WHERE id=%s", (session_id,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def session_get_active() -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM task_sessions WHERE status='active' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def session_set_status(
+    session_id: int, status: str,
+    result: str | None = None, error: str | None = None,
+) -> None:
+    """Update a session's status, stamping the timestamp column that
+    matches the transition (paused_at/resumed_at/completed_at) — the
+    caller (agent/sessions.py) decides which status is appropriate for
+    which lifecycle event, this just persists it."""
+    now = _now()
+    sets = ["status=%s", "updated_at=%s"]
+    params: list = [status, now]
+    if status == "paused":
+        sets.append("paused_at=%s")
+        params.append(now)
+    elif status == "active":
+        sets.append("resumed_at=%s")
+        params.append(now)
+    elif status in ("done", "failed", "cancelled"):
+        sets.append("completed_at=%s")
+        params.append(now)
+    if result is not None:
+        sets.append("result=%s")
+        params.append(result)
+    if error is not None:
+        sets.append("error=%s")
+        params.append(error)
+    params.append(session_id)
+    with get_conn() as conn:
+        conn.execute(f"UPDATE task_sessions SET {', '.join(sets)} WHERE id=%s", params)
+
+
+def session_list(status: str | None = None, limit: int = 20) -> list[dict]:
+    with get_conn() as conn:
+        if status:
+            rows = conn.execute(
+                "SELECT * FROM task_sessions WHERE status=%s ORDER BY id DESC LIMIT %s",
+                (status, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM task_sessions ORDER BY id DESC LIMIT %s", (limit,)
+            ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def session_log(session_id: int, kind: str, content: str) -> int:
+    now = _now()
+    with get_conn() as conn:
+        row = conn.execute(
+            "INSERT INTO session_decisions (session_id, kind, content, created_at) "
+            "VALUES (%s,%s,%s,%s) RETURNING id",
+            (session_id, kind, content, now),
+        ).fetchone()
+        return row["id"]
+
+
+def session_journal(session_id: int) -> list[dict]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM session_decisions WHERE session_id=%s ORDER BY id ASC",
+            (session_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]

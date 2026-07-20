@@ -15,12 +15,10 @@ refusal" — the fuller version needs the reflective cycle (§3), which
 is a later stage; this is the interim, and it already stops a category
 miss from being a dead end.
 
-`ask_user` / `report` / `plan` (the spec's "base set present for any
-task") don't exist as tools yet — they belong to task sessions (§2)
-and the reflective cycle (§3). `think` stands in as the one universally
-useful, near-zero-cost tool until those land; add the others to
-_ALWAYS when they're built, don't invent them early just to match the
-letter of this section.
+`ask_user` / `session_report` / `session_plan` (the spec's "base set
+present for any task") now exist (§2 phase 1, agent/tools/sessions.py)
+alongside `think` — all four are foundational and task-agnostic rather
+than tied to a particular category, so they live in _ALWAYS.
 """
 from __future__ import annotations
 
@@ -70,7 +68,7 @@ CATEGORIES: dict[str, list[str]] = {
         "agent_update", "agent_restart", "display_restart", "os_update",
     ],
     "diagnostics": [
-        "iterations_recent", "logs_archive", "rollback_last",
+        "iterations_recent", "logs_archive", "rollback_last", "session_history",
     ],
     "send": [
         "send_file", "send_photo",
@@ -80,9 +78,8 @@ CATEGORIES: dict[str, list[str]] = {
     ],
 }
 
-# Cheap, foundational, useful regardless of task type — see module
-# docstring for why this isn't ask_user/report/plan yet.
-_ALWAYS: frozenset[str] = frozenset({"think"})
+# Cheap, foundational, useful regardless of task type — see module docstring.
+_ALWAYS: frozenset[str] = frozenset({"think", "ask_user", "session_report", "session_plan"})
 
 CATEGORY_NAMES: list[str] = list(CATEGORIES.keys())
 
