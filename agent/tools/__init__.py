@@ -38,6 +38,9 @@ from agent.tools.sessions import (  # noqa: E402  (re-export)
 from agent.tools.notify import (  # noqa: E402  (re-export)
     work_mode_set, work_mode_get,
 )
+from agent.tools.prflow import (  # noqa: E402  (re-export)
+    propose_code_change,
+)
 
 log = logging.getLogger("rubedo.tools")
 
@@ -1031,6 +1034,8 @@ TOOLS_MAP: dict[str, callable] = {
     # notify.* (stage 5 part 1 — work modes)
     "work_mode_set": work_mode_set,
     "work_mode_get": work_mode_get,
+    # prflow.* (stage 6 — code changes go through a PR, not a direct write)
+    "propose_code_change": propose_code_change,
     # memory.*
     "memory_save": remember,
     "memory_search": memory_search,
@@ -1170,6 +1175,18 @@ TOOLS_SCHEMA: list[dict] = [
         "name": "work_mode_get",
         "description": "Проверить текущий режим уведомлений",
         "parameters": {"type": "object", "properties": {}, "required": []}}},
+    {"type": "function", "function": {
+        "name": "propose_code_change",
+        "description": "Изменить код в git-репозитории (свой или другой локальный) через ветку+коммит+PR на ревью — вместо прямой правки файла. Используй это, а не file_write, для изменений в исходном коде себя самой.",
+        "parameters": {"type": "object", "properties": {
+            "files": {"type": "object", "description": "путь относительно корня репо -> новое полное содержимое файла"},
+            "branch_name": {"type": "string"},
+            "commit_message": {"type": "string"},
+            "pr_title": {"type": "string"},
+            "pr_body": {"type": "string", "default": ""},
+            "repo_path": {"type": "string", "default": "", "description": "путь к репо на диске; пусто = свой собственный код"},
+            "repo_full_name": {"type": "string", "default": "", "description": "owner/repo на GitHub; пусто = свой собственный код"},
+        }, "required": ["files", "branch_name", "commit_message", "pr_title"]}}},
     {"type": "function", "function": {
         "name": "memory_save",
         "description": "Сохранить событие или важную информацию в долгосрочную память",

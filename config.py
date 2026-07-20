@@ -82,6 +82,19 @@ SPOTRENT_CWD = os.getenv("SPOTRENT_CWD", "/home/rubedo/spotrent")
 # in workspace/undo/ before it's eligible for pruning.
 UNDO_TTL_DAYS = _int("UNDO_TTL_DAYS", 2)
 
+# PR-flow (stage 6) — a code change to a git-tracked project goes
+# through a branch + commit + pull request instead of a direct file
+# write to the running tree. GITHUB_TOKEN needs `repo` scope (a fine-
+# grained PAT with contents+pull-requests write is enough). Empty by
+# default: agent/prflow.py reports "not configured" rather than
+# guessing a token. REPO_PATH/REPO_FULL_NAME are the defaults used when
+# the model proposes a change to "self" (her own codebase) — other
+# local repos can still pass their own path/full_name explicitly.
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
+GITHUB_API_BASE_URL = os.getenv("GITHUB_API_BASE_URL", "https://api.github.com")
+REPO_PATH = os.getenv("REPO_PATH", "")
+REPO_FULL_NAME = os.getenv("REPO_FULL_NAME", "")
+
 # Bus
 BUS_HOST = "127.0.0.1"
 BUS_PORT = 9999

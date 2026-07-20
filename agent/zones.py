@@ -47,6 +47,12 @@ _YELLOW: frozenset[str] = frozenset({
     # Server transport (§1.2) — same reasoning as system_shell, just on
     # the other host. spotrent_status stays green (read-only, §1).
     "server_shell",
+    # PR-flow (stage 6) — pushes a branch and opens a real, visible
+    # GitHub PR. Doesn't touch the running tree or deploy anything
+    # itself, but it's still a consequential external action, not a
+    # local no-op — same "writes outside her own workspace" reasoning
+    # file_write gets when it escapes workspace/.
+    "propose_code_change",
 })
 
 # Tools that are always red: Rubedo's own core, sudo, system-level change,
