@@ -19,6 +19,7 @@ from agent.prompts import build_gpt_system, build_analytics_system
 from agent.tools import TOOLS_SCHEMA, TOOLS_MAP, set_context
 from agent import approval, stopword, outcomes, sessions, questions
 from agent.reflect import reflect_on_failure
+from agent.verify import find_unacknowledged_failures
 from agent.tool_categories import get_tools_for_categories
 from memory.db import (
     load_history, save_message, load_facts, search_events,
@@ -597,6 +598,28 @@ async def handle_message(
                         reply = _verdict["diagnosis"]
                 else:
                     reply = _verdict["diagnosis"]
+
+    # Post-verification (§4, stage 4) — whatever the session's final
+    # verdict ended up being (first attempt or reflective retry), cross-
+    # check its self-report against what its tools actually returned
+    # before the owner ever sees it. Never overturns the verdict (a
+    # later successful retry after an earlier failed step is not a
+    # lie) — only makes sure a failure the model itself didn't mention
+    # doesn't get reported as "готово".
+    if task_session_id is not None:
+        _verify_sess = sessions.get(task_session_id)
+        if _verify_sess and _verify_sess["status"] == "done":
+            _verify_journal = sessions.journal(task_session_id)
+            _unacked = find_unacknowledged_failures(_verify_journal, reply)
+            if _unacked:
+                sessions.log_decision(
+                    task_session_id, "post_verify",
+                    "Несоответствие: " + " | ".join(_unacked[:3]),
+                )
+                reply += (
+                    "\n\n(Хотя я отчиталась как готово — по журналу были ошибки: "
+                    + "; ".join(_unacked[:2]) + ". Проверь на всякий случай.)"
+                )
 
     await send_fn(reply)
     save_message(session_id, "assistant", reply)
