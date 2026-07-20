@@ -168,11 +168,6 @@ def get_due() -> list[dict]:
 
 # ─ Tick ─────────────────────────────────────────────────────────────────
 
-def _within_quiet_window(now: datetime) -> bool:
-    cur = now.strftime("%H:%M")
-    return POOL_QUIET_START <= cur < POOL_QUIET_END
-
-
 def _today_nudge_count(now: datetime) -> int:
     """Count today's primary nudge events. P5 piggybacks are excluded so
     they don't block subsequent P1-P3 events."""
@@ -194,8 +189,10 @@ async def run_tick(tg_client, owner_id: int) -> None:
     they are surfaced at morning briefing via `get_morning_batch()`. P5
     additionally rides along when a P1-P3 primary fires here.
     """
+    from agent import notify
+
     now = datetime.now()
-    if not _within_quiet_window(now):
+    if not notify.should_notify("low", quiet_start=POOL_QUIET_START, quiet_end=POOL_QUIET_END):
         return
     if _today_nudge_count(now) >= POOL_MAX_NUDGES_PER_DAY:
         return

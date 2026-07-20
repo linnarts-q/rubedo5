@@ -42,6 +42,7 @@ CATEGORIES: dict[str, list[str]] = {
         "event_add", "event_list", "event_delete",
         "recurring_add", "recurring_list", "recurring_delete",
         "alarm_skip", "alarm_cancel",
+        "work_mode_set", "work_mode_get",
     ],
     "queue": [
         "queue_add", "queue_list", "queue_cancel", "queue_pause", "queue_resume",

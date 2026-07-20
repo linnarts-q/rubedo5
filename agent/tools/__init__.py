@@ -35,6 +35,9 @@ from agent.tools.shell import (  # noqa: E402  (re-export)
 from agent.tools.sessions import (  # noqa: E402  (re-export)
     plan, report, ask_user, session_history,
 )
+from agent.tools.notify import (  # noqa: E402  (re-export)
+    work_mode_set, work_mode_get,
+)
 
 log = logging.getLogger("rubedo.tools")
 
@@ -1025,6 +1028,9 @@ TOOLS_MAP: dict[str, callable] = {
     "session_report": report,
     "ask_user": ask_user,
     "session_history": session_history,
+    # notify.* (stage 5 part 1 — work modes)
+    "work_mode_set": work_mode_set,
+    "work_mode_get": work_mode_get,
     # memory.*
     "memory_save": remember,
     "memory_search": memory_search,
@@ -1156,6 +1162,14 @@ TOOLS_SCHEMA: list[dict] = [
         "name": "session_history",
         "description": "Посмотреть список последних сессий задач или журнал решений конкретной сессии по id",
         "parameters": {"type": "object", "properties": {"session_id": {"type": "integer", "default": 0}, "limit": {"type": "integer", "default": 10}}, "required": []}}},
+    {"type": "function", "function": {
+        "name": "work_mode_set",
+        "description": "Сменить режим уведомлений: 'normal' (обычный) или 'quiet' (не беспокоить — проходят только срочные)",
+        "parameters": {"type": "object", "properties": {"mode": {"type": "string"}}, "required": ["mode"]}}},
+    {"type": "function", "function": {
+        "name": "work_mode_get",
+        "description": "Проверить текущий режим уведомлений",
+        "parameters": {"type": "object", "properties": {}, "required": []}}},
     {"type": "function", "function": {
         "name": "memory_save",
         "description": "Сохранить событие или важную информацию в долгосрочную память",
