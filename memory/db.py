@@ -318,6 +318,11 @@ def init_db():
             );
             CREATE INDEX IF NOT EXISTS hanging_questions_kind_status_idx
                 ON hanging_questions (kind, status);
+            CREATE TABLE IF NOT EXISTS day_phase_state (
+                id INTEGER PRIMARY KEY,
+                phase TEXT NOT NULL DEFAULT 'night',
+                entered_at TEXT NOT NULL
+            );
         """)
 
 
@@ -1160,4 +1165,35 @@ def hanging_resolve(hq_id: int, status: str) -> None:
         conn.execute(
             "UPDATE hanging_questions SET status=%s, resolved_at=%s WHERE id=%s",
             (status, _now(), hq_id),
+        )
+
+
+# ─ Day phase (§16, day engine 5.0) ─────────────────────────────────────
+# Deliberately NOT keyed by date, unlike day_state — phase is a
+# cross-day singleton (night can span past midnight until a real
+# wake-up event fires), so there is no per-date row to silently reset
+# it at midnight the way day_state's PK would.
+
+def get_day_phase() -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM day_phase_state WHERE id=1").fetchone()
+    return dict(row) if row else None
+
+
+def init_day_phase(phase: str, entered_at: str) -> None:
+    """Only ever inserts the id=1 row if it doesn't exist yet — use
+    set_day_phase() for actual transitions."""
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO day_phase_state (id, phase, entered_at) VALUES (1, %s, %s) "
+            "ON CONFLICT (id) DO NOTHING",
+            (phase, entered_at),
+        )
+
+
+def set_day_phase(phase: str, entered_at: str) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE day_phase_state SET phase=%s, entered_at=%s WHERE id=1",
+            (phase, entered_at),
         )
