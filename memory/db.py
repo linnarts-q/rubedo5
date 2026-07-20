@@ -1251,3 +1251,15 @@ def mark_bundle_delivered(ids: list[int]) -> None:
             "UPDATE notification_bundle SET delivered_at=%s WHERE id = ANY(%s)",
             (now, ids),
         )
+
+
+def list_experience_by_date(target_date: str) -> list[dict]:
+    """Yesterday's condensed session outcomes — the cheapest thing to
+    query meaningfully as "yesterday's decision journal" for briefing
+    content (day/planner.py) without re-reading every raw
+    session_decisions row."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM experience WHERE date=%s ORDER BY id ASC", (target_date,)
+        ).fetchall()
+    return [dict(r) for r in rows]
