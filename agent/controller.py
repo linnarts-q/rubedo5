@@ -24,6 +24,7 @@ from memory.db import (
     load_latest_summary, save_summary, save_event, load_recent_events,
     count_messages_since_last_summary, load_messages_since_last_summary,
     get_last_message_time, save_meta, load_meta, profile_get_all,
+    search_experience,
 )
 from llm.groq import chat as groq_chat
 from llm.exceptions import AllKeysExhausted
@@ -471,6 +472,7 @@ async def handle_message(
     plan_text = ""
     max_iter = _ROUTE_MAX_ITER.get(route, 8)
     task_session_id = None
+    similar_experience = None
 
     if route == "deep":
         plan = await make_plan(intent, list(TOOLS_MAP.keys()))
@@ -487,6 +489,13 @@ async def handle_message(
         task_session_id = _tsess["id"]
         if steps:
             sessions.log_decision(task_session_id, "plan", plan_text)
+        # Experience revival (§9, stage 3) — surface how similar past
+        # attempts went before this one starts, not after it fails the
+        # same way again.
+        try:
+            similar_experience = search_experience(intent or text, limit=3) or None
+        except Exception as e:
+            log.debug(f"experience search skipped: {e}")
 
     if _first_after_restart:
         last_time = get_last_message_time(session_id)
@@ -509,6 +518,7 @@ async def handle_message(
         day_state=day_state,
         owner_profile=owner_profile,
         self_profile=self_profile,
+        similar_experience=similar_experience,
     )
 
     messages = [{"role": "system", "content": system}]

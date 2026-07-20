@@ -16,11 +16,19 @@ It exists for two reasons:
 
 2. The decision journal (session_decisions in memory/db.py) is the
    retrievable trail of what happened and why during a session — tool
-   calls, the model's own `plan`/`report` notes, pauses, resumes. This
-   is the substrate the future reflective cycle (§3) reads from to
-   analyze past mistakes; for now it's write-mostly infrastructure that
-   agent/executor.py and agent/tools/sessions.py append to, and
-   `session_history` (a tool) reads back out.
+   calls, the model's own `plan`/`report` notes, pauses, resumes.
+
+3. Experience revival (§9, stage 3): every session that reaches a real
+   verdict — done or failed, not merely cancelled — condenses into one
+   row in the long-dead `experience` table (ported from rubedo4,
+   unused until now): what was attempted, which tools were used, in
+   what order, and how it turned out. agent/controller.py looks this
+   up (memory.db.search_experience, pg_trgm similarity) before a new
+   "deep" task starts and surfaces close matches as context — "how did
+   something like this go last time" — which is the concrete substrate
+   the goal's "analyzes its own mistakes" needs, and the retrieval half
+   of memory layer 4 (§11): real search over structured past attempts,
+   not fuzzy title-matching against ephemeral chat history.
 """
 from __future__ import annotations
 
@@ -29,11 +37,30 @@ import logging
 from memory.db import (
     session_create, session_get, session_get_active, session_set_status,
     session_list as _session_list, session_log, session_journal as _session_journal,
+    save_experience,
 )
 
 log = logging.getLogger("rubedo.agent.sessions")
 
 _TERMINAL = {"done", "failed", "cancelled"}
+
+
+def _revive_experience(session_id: int, success: bool) -> None:
+    """Condense a finished session's journal into one `experience` row.
+    Best-effort: a save failure here must never break the session
+    lifecycle transition that triggered it."""
+    try:
+        s = session_get(session_id)
+        if not s:
+            return
+        entries = _session_journal(session_id)
+        chain = " → ".join(
+            e["content"].split(" -> ", 1)[0] for e in entries if e["kind"] == "tool_call"
+        )
+        outcome = (s.get("result") or s.get("error") or "")[:300]
+        save_experience(s["title"], chain, outcome, success=success)
+    except Exception as e:
+        log.debug(f"experience revival skipped for session #{session_id}: {e}")
 
 
 def start(title: str, origin: str = "chat") -> dict:
@@ -74,6 +101,7 @@ def complete(session_id: int | None, result: str = "") -> None:
         return
     session_set_status(session_id, "done", result=result)
     session_log(session_id, "complete", result or "готово")
+    _revive_experience(session_id, success=True)
 
 
 def fail(session_id: int | None, error: str) -> None:
@@ -81,6 +109,7 @@ def fail(session_id: int | None, error: str) -> None:
         return
     session_set_status(session_id, "failed", error=error)
     session_log(session_id, "fail", error)
+    _revive_experience(session_id, success=False)
 
 
 def cancel(session_id: int | None, reason: str = "") -> None:

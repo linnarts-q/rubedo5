@@ -104,6 +104,7 @@ _MAX_FACTS_CHARS = 600
 _MAX_EVENTS_CHARS = 500
 _MAX_SUMMARY_CHARS = 800
 _MAX_ACTIONS_CHARS = 400
+_MAX_EXPERIENCE_CHARS = 500
 
 # Layer 2 (techspec §11): "directive ≠ reference" — a hard fence around
 # everything pulled from memory, so a closed-out past request ("сделай
@@ -134,6 +135,19 @@ def _fmt_profile(data: dict[str, str]) -> str:
     return "\n".join(f"- {k}: {v}" for k, v in data.items())
 
 
+def _fmt_experience(items: list[dict]) -> list[str]:
+    out = []
+    for e in items:
+        verdict = "получилось" if e.get("success") else "не получилось"
+        line = f"«{e['task_description']}» — {verdict}"
+        if e.get("tool_chain"):
+            line += f" (инструменты: {e['tool_chain']})"
+        if e.get("result"):
+            line += f": {e['result']}"
+        out.append(line)
+    return out
+
+
 def build_gpt_system(
     interlocutor: str,
     context_type: str,
@@ -146,6 +160,7 @@ def build_gpt_system(
     day_state: dict | None = None,
     owner_profile: dict | None = None,
     self_profile: dict | None = None,
+    similar_experience: list[dict] | None = None,
 ) -> str:
     parts = [_PERSONALITY.format(owner=OWNER_NAME), _CADENCE]
 
@@ -163,11 +178,19 @@ def build_gpt_system(
         parts.append("\nAbout {owner}:\n".format(owner=OWNER_NAME) + _fmt_profile(owner_profile))
 
     _has_context = bool(
-        facts or recent_actions or recent_events or summary
+        facts or recent_actions or recent_events or summary or similar_experience
         or (day_state and (day_state.get("tasks") or day_state.get("notes")))
     )
     if _has_context:
         parts.append(_FENCE_OPEN)
+
+    if similar_experience:
+        trimmed = _trim_to_budget(_fmt_experience(similar_experience), _MAX_EXPERIENCE_CHARS)
+        if trimmed:
+            parts.append(
+                "\nПохожее уже случалось (учти при подходе к задаче, не повторяй ошибок):\n"
+                + "\n".join(f"- {e}" for e in trimmed)
+            )
 
     if facts:
         trimmed = _trim_to_budget(facts[:15], _MAX_FACTS_CHARS)

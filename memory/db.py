@@ -131,6 +131,8 @@ def init_db():
                 success INTEGER DEFAULT 1,
                 created_at TEXT NOT NULL
             );
+            CREATE INDEX IF NOT EXISTS experience_trgm_idx ON experience
+                USING GIN (task_description gin_trgm_ops);
             CREATE TABLE IF NOT EXISTS reminders (
                 id SERIAL PRIMARY KEY,
                 session_id TEXT NOT NULL,
@@ -465,6 +467,23 @@ def save_experience(task_description: str, tool_chain: str, result: str, success
             "VALUES (%s,%s,%s,%s,%s,%s)",
             (task_description, datetime.now().date().isoformat(), tool_chain, result, int(success), _now()),
         )
+
+
+def search_experience(query: str, limit: int = 3) -> list[dict]:
+    """Find past task attempts whose description resembles `query`,
+    ranked by trigram similarity (pg_trgm — already enabled in
+    init_db()). Threshold 0.15 is a starting point tuned against real
+    short Russian task titles, not a spec-mandated number; short/vague
+    queries naturally score lower and just won't match anything, which
+    is the right failure mode here (silence over a bad match)."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT *, similarity(task_description, %s) AS sim FROM experience "
+            "WHERE similarity(task_description, %s) > 0.15 "
+            "ORDER BY sim DESC LIMIT %s",
+            (query, query, limit),
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 # ─ Events (episodic memory) ───────────────────────────────────────────
