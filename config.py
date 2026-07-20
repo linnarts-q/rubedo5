@@ -40,9 +40,18 @@ DB_PATH = os.getenv("DB_PATH", "data/rubedo5.db")
 
 # System
 # NOTE: no SUDO_PASSWORD here by design (techspec stage 0/§10). Sudo
-# credentials move to an encrypted per-host table (§1.6) instead of a
-# plaintext env var — see agent/tools/shell.py:run_sudo, currently
-# stubbed pending that table.
+# credentials live in an encrypted per-host table instead (§1.6,
+# agent/credentials.py) — see agent/tools/shell.py:run_sudo.
+#
+# CREDENTIALS_KEY is the *decryption* key for that table. It lives here
+# in .env, separate from the encrypted passwords themselves (those live
+# in the DB file) — the point isn't hiding the key from .env, it's that
+# leaking *either* the DB file or .env alone isn't enough to recover a
+# password; both have to leak together. Generate one with:
+#   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+# Empty by default: credentials.get_password() then always returns
+# None rather than guessing a key.
+CREDENTIALS_KEY = os.getenv("CREDENTIALS_KEY", "")
 
 # Stop-phrase (techspec §15) — checked as a plain string comparison
 # before any LLM call, so it works even if the models are down or

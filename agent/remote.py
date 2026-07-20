@@ -50,16 +50,24 @@ def _ssh_base_args() -> list[str]:
     return args
 
 
-def run(command: str, timeout: int = _SSH_TIMEOUT_SEC) -> str:
+def run(command: str, timeout: int = _SSH_TIMEOUT_SEC, stdin_input: str | None = None) -> str:
     """Run a single command on the server over SSH and return its output
     (or a plain-language error — never raises for the caller's sake,
-    same convention as agent/tools/shell.py:shell_exec)."""
+    same convention as agent/tools/shell.py:shell_exec).
+
+    `stdin_input`, when given, is piped to the remote command's stdin
+    over the encrypted SSH channel — used by run_sudo to hand a
+    password to `sudo -S` on the server without it ever appearing in
+    a command line/process list on either machine."""
     try:
         base = _ssh_base_args()
     except ServerNotConfigured as e:
         return str(e)
     try:
-        r = subprocess.run(base + [command], capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run(
+            base + [command], capture_output=True, text=True, timeout=timeout,
+            input=stdin_input,
+        )
         out = r.stdout.strip()
         err = r.stderr.strip()
         if r.returncode != 0:

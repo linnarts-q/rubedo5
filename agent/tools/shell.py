@@ -86,20 +86,56 @@ def shell_exec(command: str, timeout: int = 30) -> str:
         return f"Ошибка: {e}"
 
 
-def run_sudo(command: str) -> str:
+def run_sudo(command: str, host: str = "local") -> str:
     """Red zone (agent/zones.py) — requires the owner's explicit go-ahead
     every time, no exceptions (see techspec §1/C12/C13).
 
-    Stubbed pending the encrypted per-host credential table (techspec
-    §1.6) — there is intentionally no plaintext sudo password in config
-    anymore (stage 0). Wire this up once that table exists instead of
-    reintroducing a SUDO_PASSWORD env var.
+    Password comes from the encrypted per-host table (techspec §1.6,
+    agent/credentials.py) by `host` label — never from config, never
+    passed in as an LLM-visible argument. `host`: "local" (this
+    machine) or "server" (the separate server, over SSH via
+    agent/remote.py). Set a password with scripts/set_credential.py,
+    run directly on the target machine — never through the agent.
     """
-    return (
-        "Sudo пока не подключён: пароль больше не хранится в .env "
-        "(см. техзадание §1.6 — зашифрованная таблица паролей по хостам, "
-        "ещё не реализована). Выполни эту команду сам."
-    )
+    from agent.credentials import get_password
+
+    blocked = _check_blacklist(command, _SUDO_BLACKLIST)
+    if blocked:
+        return f"Команда sudo заблокирована в целях безопасности: {blocked}"
+
+    password = get_password(host)
+    if password is None:
+        return (
+            f"Пароль sudo для '{host}' не настроен (или CREDENTIALS_KEY не задан). "
+            f"Задай его на самой машине: python scripts/set_credential.py {host}"
+        )
+
+    if host == "local":
+        try:
+            import shlex
+            args = ["sudo", "-S"] + shlex.split(command)
+            r = subprocess.run(
+                args,
+                input=password + "\n",
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            out = r.stdout.strip()
+            err = "\n".join(
+                line for line in r.stderr.splitlines()
+                if "password" not in line.lower() and "[sudo]" not in line.lower()
+            ).strip()
+            if r.returncode != 0:
+                return f"[код {r.returncode}]\n{err or out}"
+            return out or "(пусто)"
+        except subprocess.TimeoutExpired:
+            return "Таймаут команды."
+        except Exception as e:
+            return f"Ошибка: {e}"
+
+    from agent import remote
+    return remote.run(f"sudo -S {command}", stdin_input=password + "\n")
 
 
 def run_code(code: str) -> str:

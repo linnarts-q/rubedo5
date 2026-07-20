@@ -853,17 +853,30 @@ def self_update() -> str:
 
 
 def system_update() -> str:
-    """Update system packages via apt (sudo apt update && apt upgrade).
-
-    Red zone (agent/zones.py) — stubbed pending the encrypted per-host
-    credential table (techspec §1.6), same reasoning as
-    agent/tools/shell.py:run_sudo. There is intentionally no
-    SUDO_PASSWORD in config anymore.
+    """Update system packages on the mini-PC via apt (sudo apt update &&
+    apt upgrade). Red zone (agent/zones.py) — password comes from the
+    encrypted 'local' credential (techspec §1.6, agent/credentials.py).
     """
-    return (
-        "Обновление системы пока не подключено: пароль sudo больше не хранится "
-        "в .env (см. техзадание §1.6). Выполни apt update/upgrade сам."
-    )
+    from agent.credentials import get_password
+    password = get_password("local")
+    if password is None:
+        return (
+            "Пароль sudo для 'local' не настроен (или CREDENTIALS_KEY не задан). "
+            "Задай его на мини-ПК: python scripts/set_credential.py local"
+        )
+    try:
+        r = subprocess.run(
+            ["sudo", "-S", "apt", "update"],
+            input=password + "\n", capture_output=True, text=True, timeout=60,
+        )
+        r2 = subprocess.run(
+            ["sudo", "-S", "apt", "upgrade", "-y"],
+            input=password + "\n", capture_output=True, text=True, timeout=300,
+        )
+        out = (r2.stdout or r2.stderr or "").strip()
+        return f"Системные пакеты обновлены.\n{out[-300:]}" if out else "Системные пакеты обновлены."
+    except Exception as e:
+        return f"Ошибка обновления системы: {e}"
 
 
 def launch_browser(url: str = "") -> str:
@@ -1169,8 +1182,11 @@ TOOLS_SCHEMA: list[dict] = [
         "parameters": {"type": "object", "properties": {"command": {"type": "string"}, "timeout": {"type": "integer", "default": 30}}, "required": ["command"]}}},
     {"type": "function", "function": {
         "name": "system_sudo",
-        "description": "Выполнить команду с sudo",
-        "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}}},
+        "description": "Выполнить команду с sudo. host — 'local' (эта машина, по умолчанию) или 'server' (отдельный сервер).",
+        "parameters": {"type": "object", "properties": {
+            "command": {"type": "string"},
+            "host": {"type": "string", "enum": ["local", "server"], "default": "local"},
+        }, "required": ["command"]}}},
     {"type": "function", "function": {
         "name": "system_code",
         "description": "Выполнить Python-код",

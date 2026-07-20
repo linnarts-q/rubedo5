@@ -203,4 +203,6 @@ def _preview_process_kill(args: dict) -> str:
 
 def _preview_command(tool_name: str, args: dict) -> str:
     command = args.get("command") or args.get("code") or ""
-    return f"{tool_name}: выполнит —\n{command}"
+    host = args.get("host")
+    host_note = f" на '{host}'" if host else ""
+    return f"{tool_name}{host_note}: выполнит —\n{command}"

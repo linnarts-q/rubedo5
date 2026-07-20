@@ -11,3 +11,4 @@ edge-tts>=7.0.0
 playwright>=1.40.0
 beautifulsoup4>=4.12.0
 holidays>=0.50
+cryptography>=42.0.0
