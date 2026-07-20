@@ -307,6 +307,17 @@ def init_db():
                 created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS session_decisions_session_idx ON session_decisions (session_id, id);
+            CREATE TABLE IF NOT EXISTS hanging_questions (
+                id SERIAL PRIMARY KEY,
+                kind TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                task_session_id INTEGER,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL,
+                resolved_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS hanging_questions_kind_status_idx
+                ON hanging_questions (kind, status);
         """)
 
 
@@ -1105,3 +1116,48 @@ def session_journal(session_id: int) -> list[dict]:
             (session_id,),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ─ Hanging questions (§5, stage 4) ─────────────────────────────────────
+# The real, multi-slot entity behind what agent/approval.py and
+# agent/questions.py each used to fake with a single meta-key slot — a
+# meta key can only ever hold one pending item, so a second yellow-zone
+# call (or ask_user) while the first was still unanswered silently
+# overwrote it. Every call gets its own row here instead.
+
+def hanging_create(kind: str, payload: str, task_session_id: int | None = None) -> int:
+    now = _now()
+    with get_conn() as conn:
+        row = conn.execute(
+            "INSERT INTO hanging_questions (kind, payload, task_session_id, status, created_at) "
+            "VALUES (%s,%s,%s,'pending',%s) RETURNING id",
+            (kind, payload, task_session_id, now),
+        ).fetchone()
+        return row["id"]
+
+
+def hanging_get(hq_id: int) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM hanging_questions WHERE id=%s", (hq_id,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def hanging_list_pending(kind: str) -> list[dict]:
+    """Newest first — the default assumption for "which pending item
+    does this reply answer" is the most recently asked one."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM hanging_questions WHERE kind=%s AND status='pending' ORDER BY id DESC",
+            (kind,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def hanging_resolve(hq_id: int, status: str) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE hanging_questions SET status=%s, resolved_at=%s WHERE id=%s",
+            (status, _now(), hq_id),
+        )

@@ -1,5 +1,4 @@
-"""Approval gate for yellow/red-zone tool calls (techspec §1, minimal
-precursor to the full "hanging question" entity in §5).
+"""Approval gate for yellow/red-zone tool calls (techspec §1).
 
 A yellow/red tool call never executes on the turn it was requested.
 The executor halts the tool loop right there and the confirmation
@@ -11,23 +10,21 @@ falls through to the normal conversation (the owner asked something
 unrelated, or wants to talk about the request first — see
 is_confirmation's None case).
 
-TTL-armed the same way the other meta-based intercepts in
-controller.py already are (wrapup plan/verification, T+60, pending
-clarification) — an unrelated message hours later must not
-accidentally execute a stale sudo command.
+Storage, TTL, and multi-slot handling all live in agent/hanging.py
+(§5, stage 4) — this module is just the "approval"-kind wrapper over
+it, keeping the exact request/pending/clear signatures this file has
+always had.
 """
 from __future__ import annotations
 
-import json
 import logging
-from datetime import datetime
 
-from config import APPROVAL_TTL_HOURS
+from agent import hanging
 
 log = logging.getLogger("rubedo.agent.approval")
 
-_META_PENDING = "pending_tool_approval"
-_META_ARMED_AT = "pending_tool_approval_armed_at"
+_KIND = "approval"
+_current_id: int | None = None
 
 _YES_WORDS = {
     "да", "давай", "ок", "окей", "ok", "yes", "делай", "выполняй",
@@ -46,58 +43,27 @@ def request(name: str, args: dict, preview: str, task_session_id: int | None = N
     agent/controller.py resume and then complete/cancel that same
     session once the owner answers, instead of leaving it paused
     forever with no way back."""
-    from memory.db import save_meta
-    save_meta(_META_PENDING, json.dumps({
-        "name": name, "args": args, "preview": preview, "task_session_id": task_session_id,
-    }))
-    save_meta(_META_ARMED_AT, datetime.now().isoformat())
+    hanging.create(
+        _KIND,
+        {"name": name, "args": args, "preview": preview, "task_session_id": task_session_id},
+        task_session_id=task_session_id,
+    )
 
 
 def pending() -> dict | None:
-    """Return the pending call {name, args, preview}, or None if there
-    isn't one or it went stale past APPROVAL_TTL_HOURS."""
-    from memory.db import load_meta
-
-    raw = load_meta(_META_PENDING)
-    if not raw:
-        return None
-    armed = load_meta(_META_ARMED_AT) or ""
-    try:
-        armed_dt = datetime.fromisoformat(armed)
-    except ValueError:
-        clear()
-        return None
-    if (datetime.now() - armed_dt).total_seconds() > APPROVAL_TTL_HOURS * 3600:
-        log.info("Pending approval expired (TTL), clearing")
-        _fail_orphaned_session(raw)
-        clear()
-        return None
-    try:
-        return json.loads(raw)
-    except Exception:
-        clear()
-        return None
-
-
-def _fail_orphaned_session(raw: str) -> None:
-    """A paused task session (§2 phase 1) whose approval went stale has
-    nothing left to wait for — mark it failed rather than leaving it
-    'paused' forever with no way back in. Best-effort: a malformed or
-    session-less payload is silently ignored, same as the surrounding
-    TTL-eviction paths."""
-    try:
-        tsid = json.loads(raw).get("task_session_id")
-        if tsid is not None:
-            from agent import sessions
-            sessions.fail(tsid, "подтверждение просрочено (TTL)")
-    except Exception as e:
-        log.debug(f"orphaned-session fail skipped: {e}")
+    """Return the pending call {name, args, preview, task_session_id},
+    or None if there isn't one or it went stale past APPROVAL_TTL_HOURS."""
+    global _current_id
+    p = hanging.pending(_KIND)
+    _current_id = p.pop("_hanging_id") if p else None
+    return p
 
 
 def clear() -> None:
-    from memory.db import save_meta
-    save_meta(_META_PENDING, "")
-    save_meta(_META_ARMED_AT, "")
+    global _current_id
+    if _current_id is not None:
+        hanging.resolve(_current_id, "answered")
+        _current_id = None
 
 
 def is_confirmation(text: str) -> bool | None:
