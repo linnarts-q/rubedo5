@@ -18,6 +18,7 @@ from agent.audit import AuditLogger, check_normal_threshold, NORMAL_DIR
 from agent.prompts import build_gpt_system, build_analytics_system
 from agent.tools import TOOLS_SCHEMA, TOOLS_MAP, set_context
 from agent import approval, stopword, outcomes, sessions, questions
+from agent.reflect import reflect_on_failure
 from agent.tool_categories import get_tools_for_categories
 from memory.db import (
     load_history, save_message, load_facts, search_events,
@@ -564,6 +565,38 @@ async def handle_message(
         sessions.fail(task_session_id, f"{type(e).__name__}: {e}")
         await bus_client.publish(AgentError(session_id=session_id, error=str(e)))
         log.exception(f"Agent error [{type(e).__name__}]: {e}")
+
+    # Reflective cycle (§3, stage 3) — a task session that ended up
+    # failed gets one look back at its own journal before the owner
+    # sees a generic error: either a corrected retry, or an honest,
+    # specific diagnosis instead of "что-то пошло не так".
+    if task_session_id is not None:
+        _final_sess = sessions.get(task_session_id)
+        if _final_sess and _final_sess["status"] == "failed":
+            _journal = sessions.journal(task_session_id)
+            _already_reflected = any(e["kind"] == "reflect" for e in _journal)
+            if not _already_reflected:
+                _verdict = await reflect_on_failure(_journal, _final_sess.get("error") or "")
+                sessions.log_decision(task_session_id, "reflect", _verdict["diagnosis"])
+                if _verdict["retry"] and _verdict["corrected_approach"]:
+                    sessions.resume(task_session_id)
+                    retry_messages = messages + [{
+                        "role": "user",
+                        "content": f"Прошлая попытка не удалась. Скорректированный подход: {_verdict['corrected_approach']}",
+                    }]
+                    try:
+                        reply, _ = await executor_run(
+                            retry_messages, tools_schema, tools_map, session_id, bus_client, max_iter,
+                            audit=audit,
+                            full_tools_schema=TOOLS_SCHEMA, full_tools_map=TOOLS_MAP,
+                            task_session_id=task_session_id, tool_categories=_tool_cats,
+                        )
+                        reply = _clean_reply(reply)
+                    except Exception as e2:
+                        sessions.fail(task_session_id, f"retry failed: {type(e2).__name__}: {e2}")
+                        reply = _verdict["diagnosis"]
+                else:
+                    reply = _verdict["diagnosis"]
 
     await send_fn(reply)
     save_message(session_id, "assistant", reply)
