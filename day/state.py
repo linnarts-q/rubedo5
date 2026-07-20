@@ -1,17 +1,10 @@
 from __future__ import annotations
 import json
 import logging
-import sqlite3
 from datetime import date, datetime
-from config import DB_PATH
+from memory.db import get_conn as _conn
 
 log = logging.getLogger("rubedo.day.state")
-
-
-def _conn():
-    conn = sqlite3.connect(DB_PATH, timeout=5.0)
-    conn.row_factory = sqlite3.Row
-    return conn
 
 
 def _notify_plan_changed() -> None:
@@ -35,7 +28,7 @@ def _notify_task_completed(task_id: int) -> None:
 def get_today_state() -> dict | None:
     today = date.today().isoformat()
     with _conn() as conn:
-        row = conn.execute("SELECT * FROM day_state WHERE date=?", (today,)).fetchone()
+        row = conn.execute("SELECT * FROM day_state WHERE date=%s", (today,)).fetchone()
     return dict(row) if row else None
 
 
@@ -43,10 +36,11 @@ def ensure_today() -> dict:
     """Ensure today's state row exists, return it."""
     today = date.today().isoformat()
     with _conn() as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        conn.execute("INSERT OR IGNORE INTO day_state(date) VALUES(?)", (today,))
-        row = conn.execute("SELECT * FROM day_state WHERE date=?", (today,)).fetchone()
-        conn.commit()
+        conn.execute(
+            "INSERT INTO day_state(date) VALUES(%s) ON CONFLICT (date) DO NOTHING",
+            (today,),
+        )
+        row = conn.execute("SELECT * FROM day_state WHERE date=%s", (today,)).fetchone()
     return dict(row)
 
 
@@ -64,12 +58,11 @@ def hydrate_recurring() -> int:
     added = 0
 
     with _conn() as conn:
-        conn.execute("BEGIN IMMEDIATE")
         recurring = conn.execute("SELECT * FROM recurring_tasks WHERE active=1").fetchall()
         for task in recurring:
             row = dict(task)
             existing = conn.execute(
-                "SELECT id FROM day_tasks WHERE date=? AND recurring_id=?",
+                "SELECT id FROM day_tasks WHERE date=%s AND recurring_id=%s",
                 (today_str, row["id"]),
             ).fetchone()
             if existing:
@@ -91,7 +84,7 @@ def hydrate_recurring() -> int:
             if applies:
                 conn.execute(
                     "INSERT INTO day_tasks(date, title, description, scheduled_at, "
-                    "duration, type, position, recurring_id) VALUES(?,?,?,?,?,?,?,?)",
+                    "duration, type, position, recurring_id) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
                     (
                         today_str, row["title"], row.get("description", ""),
                         row.get("time"), row.get("duration", 60),
@@ -99,7 +92,6 @@ def hydrate_recurring() -> int:
                     ),
                 )
                 added += 1
-        conn.commit()
     if added:
         _notify_plan_changed()
     return added
@@ -109,8 +101,8 @@ def set_briefing_done(value: bool = True) -> None:
     today = date.today().isoformat()
     with _conn() as conn:
         conn.execute(
-            "INSERT INTO day_state(date, briefing_done) VALUES(?,?) "
-            "ON CONFLICT(date) DO UPDATE SET briefing_done=excluded.briefing_done",
+            "INSERT INTO day_state(date, briefing_done) VALUES(%s,%s) "
+            "ON CONFLICT (date) DO UPDATE SET briefing_done=excluded.briefing_done",
             (today, int(value)),
         )
 
@@ -119,8 +111,8 @@ def set_wrapup_done(value: bool = True) -> None:
     today = date.today().isoformat()
     with _conn() as conn:
         conn.execute(
-            "INSERT INTO day_state(date, wrapup_done) VALUES(?,?) "
-            "ON CONFLICT(date) DO UPDATE SET wrapup_done=excluded.wrapup_done",
+            "INSERT INTO day_state(date, wrapup_done) VALUES(%s,%s) "
+            "ON CONFLICT (date) DO UPDATE SET wrapup_done=excluded.wrapup_done",
             (today, int(value)),
         )
 
@@ -129,8 +121,8 @@ def set_day_off(value: bool = True) -> None:
     today = date.today().isoformat()
     with _conn() as conn:
         conn.execute(
-            "INSERT INTO day_state(date, is_dayoff) VALUES(?,?) "
-            "ON CONFLICT(date) DO UPDATE SET is_dayoff=excluded.is_dayoff",
+            "INSERT INTO day_state(date, is_dayoff) VALUES(%s,%s) "
+            "ON CONFLICT (date) DO UPDATE SET is_dayoff=excluded.is_dayoff",
             (today, int(value)),
         )
 
@@ -139,8 +131,8 @@ def set_checkin_mode(mode: str) -> None:
     today = date.today().isoformat()
     with _conn() as conn:
         conn.execute(
-            "INSERT INTO day_state(date, checkin_mode) VALUES(?,?) "
-            "ON CONFLICT(date) DO UPDATE SET checkin_mode=excluded.checkin_mode",
+            "INSERT INTO day_state(date, checkin_mode) VALUES(%s,%s) "
+            "ON CONFLICT (date) DO UPDATE SET checkin_mode=excluded.checkin_mode",
             (today, mode),
         )
 
@@ -148,23 +140,21 @@ def set_checkin_mode(mode: str) -> None:
 def append_day_notes(text: str) -> None:
     today = date.today().isoformat()
     with _conn() as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        existing = conn.execute("SELECT notes FROM day_state WHERE date=?", (today,)).fetchone()
+        existing = conn.execute("SELECT notes FROM day_state WHERE date=%s", (today,)).fetchone()
         old = existing["notes"] if existing else ""
         new_notes = (old + "\n" + text).strip()
         conn.execute(
-            "INSERT INTO day_state(date, notes) VALUES(?,?) "
-            "ON CONFLICT(date) DO UPDATE SET notes=excluded.notes",
+            "INSERT INTO day_state(date, notes) VALUES(%s,%s) "
+            "ON CONFLICT (date) DO UPDATE SET notes=excluded.notes",
             (today, new_notes),
         )
-        conn.commit()
 
 
 def get_today_tasks() -> list[dict]:
     today = date.today().isoformat()
     with _conn() as conn:
         rows = conn.execute(
-            "SELECT * FROM day_tasks WHERE date=? AND status!='cancelled' "
+            "SELECT * FROM day_tasks WHERE date=%s AND status!='cancelled' "
             "ORDER BY position, scheduled_at",
             (today,),
         ).fetchall()
@@ -183,12 +173,12 @@ def add_day_task(
 ) -> int:
     target_date = for_date or date.today().isoformat()
     with _conn() as conn:
-        cur = conn.execute(
+        row = conn.execute(
             "INSERT INTO day_tasks(date, title, description, scheduled_at, duration, type, position, recurring_id) "
-            "VALUES(?,?,?,?,?,?,?,?)",
+            "VALUES(%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
             (target_date, title, description, scheduled_at, duration, task_type, position, recurring_id),
-        )
-        new_id = cur.lastrowid
+        ).fetchone()
+        new_id = row["id"]
     _notify_plan_changed()
     return new_id
 
@@ -198,12 +188,12 @@ def update_task_status(task_id: int, status: str, verified_by: str | None = None
     with _conn() as conn:
         if status == "done":
             conn.execute(
-                "UPDATE day_tasks SET status=?, verified_by=?, completed_at=? WHERE id=?",
+                "UPDATE day_tasks SET status=%s, verified_by=%s, completed_at=%s WHERE id=%s",
                 (status, verified_by, now_iso, task_id),
             )
         else:
             conn.execute(
-                "UPDATE day_tasks SET status=? WHERE id=?", (status, task_id)
+                "UPDATE day_tasks SET status=%s WHERE id=%s", (status, task_id)
             )
     _notify_plan_changed()
     if status == "done":
@@ -214,7 +204,7 @@ def reschedule_task(task_id: int, scheduled_at: str | None) -> None:
     """Reschedule a task. Clears nudges_fired so the cycle restarts from the new time."""
     with _conn() as conn:
         conn.execute(
-            "UPDATE day_tasks SET scheduled_at=?, nudges_fired='{}' WHERE id=?",
+            "UPDATE day_tasks SET scheduled_at=%s, nudges_fired='{}' WHERE id=%s",
             (scheduled_at, task_id),
         )
     _notify_plan_changed()
@@ -224,7 +214,7 @@ def get_nudges_fired(task_id: int) -> dict:
     """Return {point: ISO timestamp} for nudges already fired on this task."""
     with _conn() as conn:
         row = conn.execute(
-            "SELECT nudges_fired FROM day_tasks WHERE id=?", (task_id,)
+            "SELECT nudges_fired FROM day_tasks WHERE id=%s", (task_id,)
         ).fetchone()
     if not row or not row["nudges_fired"]:
         return {}
@@ -240,7 +230,7 @@ def mark_nudge_fired(task_id: int, point: str) -> None:
     fired[point] = datetime.now().isoformat()
     with _conn() as conn:
         conn.execute(
-            "UPDATE day_tasks SET nudges_fired=? WHERE id=?",
+            "UPDATE day_tasks SET nudges_fired=%s WHERE id=%s",
             (json.dumps(fired), task_id),
         )
 
@@ -250,7 +240,7 @@ def get_today_timed_tasks() -> list[dict]:
     today = date.today().isoformat()
     with _conn() as conn:
         rows = conn.execute(
-            "SELECT * FROM day_tasks WHERE date=? AND scheduled_at IS NOT NULL "
+            "SELECT * FROM day_tasks WHERE date=%s AND scheduled_at IS NOT NULL "
             "AND status IN ('pending','in_progress') ORDER BY scheduled_at",
             (today,),
         ).fetchall()
@@ -262,8 +252,8 @@ def get_recently_completed(since_iso: str) -> list[dict]:
     today = date.today().isoformat()
     with _conn() as conn:
         rows = conn.execute(
-            "SELECT * FROM day_tasks WHERE date=? AND status='done' "
-            "AND completed_at IS NOT NULL AND completed_at > ? "
+            "SELECT * FROM day_tasks WHERE date=%s AND status='done' "
+            "AND completed_at IS NOT NULL AND completed_at > %s "
             "ORDER BY completed_at",
             (today, since_iso),
         ).fetchall()
@@ -275,7 +265,7 @@ def get_unverified_today() -> list[dict]:
     today = date.today().isoformat()
     with _conn() as conn:
         rows = conn.execute(
-            "SELECT * FROM day_tasks WHERE date=? AND status='done' "
+            "SELECT * FROM day_tasks WHERE date=%s AND status='done' "
             "AND verified_by IN ('auto','unknown') ORDER BY scheduled_at",
             (today,),
         ).fetchall()
@@ -286,7 +276,7 @@ def increment_nudge(task_id: int) -> None:
     now = datetime.now().isoformat()
     with _conn() as conn:
         conn.execute(
-            "UPDATE day_tasks SET nudge_count=nudge_count+1, last_nudge=? WHERE id=?",
+            "UPDATE day_tasks SET nudge_count=nudge_count+1, last_nudge=%s WHERE id=%s",
             (now, task_id),
         )
 
@@ -296,8 +286,8 @@ def get_overdue_tasks() -> list[dict]:
     now_str = datetime.now().strftime("%H:%M")
     with _conn() as conn:
         rows = conn.execute(
-            "SELECT * FROM day_tasks WHERE date=? AND status='pending' "
-            "AND scheduled_at IS NOT NULL AND scheduled_at < ? "
+            "SELECT * FROM day_tasks WHERE date=%s AND status='pending' "
+            "AND scheduled_at IS NOT NULL AND scheduled_at < %s "
             "ORDER BY scheduled_at",
             (today, now_str),
         ).fetchall()
@@ -332,21 +322,19 @@ def add_recurring(
     if not cleaned:
         cleaned = ["daily"]
     with _conn() as conn:
-        cur = conn.execute(
+        row = conn.execute(
             "INSERT INTO recurring_tasks(title, description, type, days, time, duration, active) "
-            "VALUES(?,?,?,?,?,?,1)",
+            "VALUES(%s,%s,%s,%s,%s,%s,1) RETURNING id",
             (title, description, task_type, json.dumps(cleaned), time, duration),
-        )
-        conn.commit()
-        return cur.lastrowid
+        ).fetchone()
+        return row["id"]
 
 
 def delete_recurring(rid: int) -> bool:
     """Soft-delete: set active=0. Already-materialized day_tasks for today are
     not touched — caller can remove via task_remove if needed."""
     with _conn() as conn:
-        cur = conn.execute("UPDATE recurring_tasks SET active=0 WHERE id=?", (rid,))
-        conn.commit()
+        cur = conn.execute("UPDATE recurring_tasks SET active=0 WHERE id=%s", (rid,))
         return cur.rowcount > 0
 
 

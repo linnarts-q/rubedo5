@@ -35,8 +35,11 @@ GROQ_FALLBACK_MODEL = os.getenv("GROQ_FALLBACK_MODEL", "llama-3.1-8b-instant")
 # LLM — Vision (через OpenRouter, бесплатная мультимодальная модель)
 OPENROUTER_VISION_MODEL = os.getenv("OPENROUTER_VISION_MODEL", "google/gemma-4-26b-a4b-it:free")
 
-# Memory
-DB_PATH = os.getenv("DB_PATH", "data/rubedo5.db")
+# Memory — Postgres (techspec stage 1.5). Connection string for the
+# shared pool in memory/db.py; every DB-backed module (day/state.py,
+# day/pool.py, tasks/manager.py, agent/credentials.py) goes through
+# memory.db.get_conn() rather than opening its own connection.
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://rubedo:rubedo@localhost:5432/rubedo5")
 
 # System
 # NOTE: no SUDO_PASSWORD here by design (techspec stage 0/§10). Sudo

@@ -21,9 +21,10 @@ that's deliberate, not a missing feature.
 from __future__ import annotations
 
 import logging
-import sqlite3
+from datetime import datetime, timezone
 
-from config import DB_PATH, CREDENTIALS_KEY
+from config import CREDENTIALS_KEY
+from memory.db import get_conn
 
 log = logging.getLogger("rubedo.agent.credentials")
 
@@ -39,18 +40,14 @@ def _fernet():
         return None
 
 
-def _init_table(conn: sqlite3.Connection) -> None:
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS credentials (
-            host              TEXT PRIMARY KEY,
-            secret_encrypted  BLOB NOT NULL,
-            updated_at        TEXT DEFAULT (datetime('now'))
-        )
-    """)
+def _now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def set_password(host: str, password: str) -> None:
-    """Called only from scripts/set_credential.py."""
+    """Called only from scripts/set_credential.py. The `credentials`
+    table itself is created by memory.db.init_db() — this module never
+    creates schema, only reads/writes rows."""
     f = _fernet()
     if f is None:
         raise RuntimeError(
@@ -59,19 +56,14 @@ def set_password(host: str, password: str) -> None:
             "print(Fernet.generate_key().decode())\""
         )
     encrypted = f.encrypt(password.encode())
-    conn = sqlite3.connect(DB_PATH, timeout=5.0)
-    try:
-        _init_table(conn)
+    with get_conn() as conn:
         conn.execute(
             "INSERT INTO credentials (host, secret_encrypted, updated_at) "
-            "VALUES (?, ?, datetime('now')) "
-            "ON CONFLICT(host) DO UPDATE SET "
+            "VALUES (%s, %s, %s) "
+            "ON CONFLICT (host) DO UPDATE SET "
             "secret_encrypted=excluded.secret_encrypted, updated_at=excluded.updated_at",
-            (host, encrypted),
+            (host, encrypted, _now()),
         )
-        conn.commit()
-    finally:
-        conn.close()
 
 
 def get_password(host: str) -> str | None:
@@ -81,18 +73,14 @@ def get_password(host: str) -> str | None:
     f = _fernet()
     if f is None:
         return None
-    conn = sqlite3.connect(DB_PATH, timeout=5.0)
-    try:
-        _init_table(conn)
+    with get_conn() as conn:
         row = conn.execute(
-            "SELECT secret_encrypted FROM credentials WHERE host=?", (host,)
+            "SELECT secret_encrypted FROM credentials WHERE host=%s", (host,)
         ).fetchone()
-    finally:
-        conn.close()
     if not row:
         return None
     try:
-        return f.decrypt(row[0]).decode()
+        return f.decrypt(bytes(row["secret_encrypted"])).decode()
     except Exception as e:
         log.error(f"Failed to decrypt credential for host={host!r}: {e}")
         return None
@@ -105,12 +93,8 @@ def has_password(host: str) -> bool:
 def list_hosts() -> list[str]:
     """For diagnostics — which hosts have a password stored, not the
     passwords themselves."""
-    conn = sqlite3.connect(DB_PATH, timeout=5.0)
-    try:
-        _init_table(conn)
+    with get_conn() as conn:
         rows = conn.execute(
             "SELECT host, updated_at FROM credentials ORDER BY host"
         ).fetchall()
-    finally:
-        conn.close()
-    return [f"{h} (обновлён {u[:10] if u else '?'})" for h, u in rows]
+    return [f"{r['host']} (обновлён {(r['updated_at'] or '?')[:10]})" for r in rows]

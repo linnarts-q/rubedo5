@@ -64,11 +64,9 @@ def list_tasks() -> str:
 def get_task_details(task_id: int) -> str:
     import memory.db as db
     with db.get_conn() as conn:
-        import sqlite3 as _sqlite3
-        conn.row_factory = _sqlite3.Row
         row = conn.execute(
             "SELECT id, title, description, scheduled_at, duration, type, status "
-            "FROM day_tasks WHERE id=?",
+            "FROM day_tasks WHERE id=%s",
             (task_id,),
         ).fetchone()
     if not row:
@@ -89,9 +87,9 @@ def _task_title(task_id: int) -> str | None:
     import memory.db as db
     with db.get_conn() as conn:
         row = conn.execute(
-            "SELECT title FROM day_tasks WHERE id=?", (task_id,),
+            "SELECT title FROM day_tasks WHERE id=%s", (task_id,),
         ).fetchone()
-    return row[0] if row else None
+    return row["title"] if row else None
 
 
 def mark_task_done(task_id: int) -> str:

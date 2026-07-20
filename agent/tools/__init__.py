@@ -11,8 +11,6 @@ import urllib.request
 from datetime import date
 from pathlib import Path
 
-from config import DB_PATH
-
 # Sub-modules (extracted from this file as the package was created).
 # Re-exported below so TOOLS_MAP / TOOLS_SCHEMA at the bottom of this
 # file can keep referring to the names unqualified, and so external

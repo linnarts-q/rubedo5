@@ -17,10 +17,9 @@ skipped outside POOL_QUIET_START..POOL_QUIET_END.
 from __future__ import annotations
 
 import logging
-import sqlite3
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, timezone
+from memory.db import get_conn as _conn
 from config import (
-    DB_PATH,
     POOL_CADENCE_DAYS,
     POOL_QUIET_START,
     POOL_QUIET_END,
@@ -30,10 +29,11 @@ from config import (
 log = logging.getLogger("rubedo.pool")
 
 
-def _conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH, timeout=5.0)
-    conn.row_factory = sqlite3.Row
-    return conn
+def _now() -> str:
+    """Naive-UTC text timestamp — same convention as memory.db._now(),
+    since Postgres' own now() returns a tz-aware string that doesn't
+    compare cleanly against the naive datetimes _is_due() works with."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
 # ─ CRUD ─────────────────────────────────────────────────────────────────
@@ -41,18 +41,18 @@ def _conn() -> sqlite3.Connection:
 def add(title: str, description: str = "", priority: int = 3) -> int:
     priority = max(1, min(5, int(priority)))
     with _conn() as conn:
-        cur = conn.execute(
-            "INSERT INTO pool_tasks (title, description, priority) VALUES (?, ?, ?)",
-            (title, description, priority),
-        )
-        conn.commit()
-        return cur.lastrowid
+        row = conn.execute(
+            "INSERT INTO pool_tasks (title, description, priority, created_at) "
+            "VALUES (%s, %s, %s, %s) RETURNING id",
+            (title, description, priority, _now()),
+        ).fetchone()
+        return row["id"]
 
 
 def get(task_id: int) -> dict | None:
     with _conn() as conn:
         row = conn.execute(
-            "SELECT * FROM pool_tasks WHERE id=?", (task_id,)
+            "SELECT * FROM pool_tasks WHERE id=%s", (task_id,)
         ).fetchone()
     return dict(row) if row else None
 
@@ -69,18 +69,16 @@ def list_active() -> list[dict]:
 def mark_done(task_id: int) -> bool:
     with _conn() as conn:
         cur = conn.execute(
-            "UPDATE pool_tasks SET completed_at=datetime('now') "
-            "WHERE id=? AND completed_at IS NULL",
-            (task_id,),
+            "UPDATE pool_tasks SET completed_at=%s "
+            "WHERE id=%s AND completed_at IS NULL",
+            (_now(), task_id),
         )
-        conn.commit()
         return cur.rowcount > 0
 
 
 def remove(task_id: int) -> bool:
     with _conn() as conn:
-        cur = conn.execute("DELETE FROM pool_tasks WHERE id=?", (task_id,))
-        conn.commit()
+        cur = conn.execute("DELETE FROM pool_tasks WHERE id=%s", (task_id,))
         return cur.rowcount > 0
 
 
@@ -88,10 +86,9 @@ def set_priority(task_id: int, priority: int) -> bool:
     priority = max(1, min(5, int(priority)))
     with _conn() as conn:
         cur = conn.execute(
-            "UPDATE pool_tasks SET priority=? WHERE id=? AND completed_at IS NULL",
+            "UPDATE pool_tasks SET priority=%s WHERE id=%s AND completed_at IS NULL",
             (priority, task_id),
         )
-        conn.commit()
         return cur.rowcount > 0
 
 
@@ -99,22 +96,20 @@ def snooze(task_id: int, days: int) -> bool:
     until = (datetime.now() + timedelta(days=max(1, days))).isoformat()
     with _conn() as conn:
         cur = conn.execute(
-            "UPDATE pool_tasks SET snoozed_until=? "
-            "WHERE id=? AND completed_at IS NULL",
+            "UPDATE pool_tasks SET snoozed_until=%s "
+            "WHERE id=%s AND completed_at IS NULL",
             (until, task_id),
         )
-        conn.commit()
         return cur.rowcount > 0
 
 
 def mark_nudged(task_id: int) -> None:
     with _conn() as conn:
         conn.execute(
-            "UPDATE pool_tasks SET last_nudged_at=datetime('now'), "
-            "nudge_count=nudge_count+1 WHERE id=?",
-            (task_id,),
+            "UPDATE pool_tasks SET last_nudged_at=%s, "
+            "nudge_count=nudge_count+1 WHERE id=%s",
+            (_now(), task_id),
         )
-        conn.commit()
 
 
 # ─ Cadence ──────────────────────────────────────────────────────────────
@@ -184,12 +179,12 @@ def _today_nudge_count(now: datetime) -> int:
     today = now.date().isoformat()
     with _conn() as conn:
         row = conn.execute(
-            "SELECT COUNT(*) FROM pool_tasks "
-            "WHERE last_nudged_at IS NOT NULL AND date(last_nudged_at)=? "
+            "SELECT COUNT(*) AS n FROM pool_tasks "
+            "WHERE last_nudged_at IS NOT NULL AND date(last_nudged_at)=%s "
             "AND priority < 5",
             (today,),
         ).fetchone()
-    return int(row[0]) if row else 0
+    return int(row["n"]) if row else 0
 
 
 async def run_tick(tg_client, owner_id: int) -> None:
