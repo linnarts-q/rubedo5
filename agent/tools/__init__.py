@@ -994,6 +994,14 @@ def archive_agent_logs() -> str:
     return f"Архивировано {count} логов → {zip_path.name}. Папка normal/ очищена, счётчик сброшен."
 
 
+def rollback_last_change() -> str:
+    """Undo the most recent yellow-zone file write (§15). Green zone —
+    rollback itself never needs approval, or "can I undo my mistake?"
+    would be as annoying to confirm as the mistake itself."""
+    from agent.undo import rollback_last
+    return rollback_last()
+
+
 TOOLS_MAP: dict[str, callable] = {
     "think": think,
     # memory.*
@@ -1071,6 +1079,8 @@ TOOLS_MAP: dict[str, callable] = {
     # diagnostics / agent logs
     "iterations_recent": iterations_recent,
     "logs_archive": archive_agent_logs,
+    # undo (§15)
+    "rollback_last": rollback_last_change,
     # send.*
     "send_file": send_file_to_user,
     "send_photo": send_photo_to_user,
@@ -1165,6 +1175,14 @@ TOOLS_SCHEMA: list[dict] = [
         "name": "system_code",
         "description": "Выполнить Python-код",
         "parameters": {"type": "object", "properties": {"code": {"type": "string"}}, "required": ["code"]}}},
+    {"type": "function", "function": {
+        "name": "rollback_last",
+        "description": (
+            "Откатить последнюю запись/удаление файла за пределами workspace "
+            "(из тех, что требовали подтверждения). Возвращает старое содержимое "
+            "или удаляет то, что было создано, если файла раньше не было."
+        ),
+        "parameters": {"type": "object", "properties": {}, "required": []}}},
     {"type": "function", "function": {
         "name": "server_shell",
         "description": (

@@ -105,6 +105,17 @@ async def _run_approved_tool(name: str, args: dict) -> str:
     fn = TOOLS_MAP.get(name)
     if fn is None:
         return f"Инструмент '{name}' не найден."
+    if name in ("file_write", "file_delete"):
+        # Undo snapshot (§15) — only reached here for the yellow-zone
+        # case (path outside workspace/); in-workspace writes are green
+        # and never come through this approval path at all.
+        try:
+            from agent.tools import _resolve_path
+            from agent import undo
+            target = _resolve_path(str(args.get("filename", "")))
+            undo.snapshot_before_write(target)
+        except Exception as e:
+            log.warning(f"undo snapshot skipped for {name}: {e}")
     try:
         coro = fn(**args) if asyncio.iscoroutinefunction(fn) else asyncio.to_thread(fn, **args)
         return str(await coro)

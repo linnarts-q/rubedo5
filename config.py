@@ -66,6 +66,10 @@ SPOTRENT_PYTHON = os.getenv("SPOTRENT_PYTHON", "/home/rubedo/spotrent/venv/bin/p
 SPOTRENT_LAUNCHER = os.getenv("SPOTRENT_LAUNCHER", "/home/rubedo/spotrent/spotrent_launcher.py")
 SPOTRENT_CWD = os.getenv("SPOTRENT_CWD", "/home/rubedo/spotrent")
 
+# Undo (techspec §15) — how long a yellow-zone write's pre-image stays
+# in workspace/undo/ before it's eligible for pruning.
+UNDO_TTL_DAYS = _int("UNDO_TTL_DAYS", 2)
+
 # Bus
 BUS_HOST = "127.0.0.1"
 BUS_PORT = 9999

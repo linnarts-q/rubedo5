@@ -99,6 +99,12 @@ def preview_for(tool_name: str, args: dict) -> str:
     try:
         if tool_name == "file_delete":
             return _preview_file_delete(args)
+        if tool_name == "file_write":
+            return _preview_file_write(args)
+        if tool_name == "file_move":
+            return _preview_file_move(args)
+        if tool_name == "system_env_set":
+            return _preview_env_set(args)
         if tool_name == "process_kill":
             return _preview_process_kill(args)
         if tool_name in ("system_shell", "system_sudo", "system_code", "server_shell"):
@@ -124,6 +130,52 @@ def _preview_file_delete(args: dict) -> str:
         return f"file_delete: {path} — файл не найден (удалять нечего)"
     size = path.stat().st_size
     return f"file_delete: удалит {path} ({size:,} байт)"
+
+
+def _preview_file_write(args: dict) -> str:
+    from agent.tools import _resolve_path
+    filename = str(args.get("filename", ""))
+    try:
+        path = _resolve_path(filename)
+    except ValueError:
+        return f"file_write: путь вне рабочей папки — {filename!r}"
+    if path.exists():
+        size = path.stat().st_size
+        return f"file_write: перезапишет {path} (сейчас {size:,} байт)"
+    return f"file_write: создаст новый файл {path}"
+
+
+def _preview_file_move(args: dict) -> str:
+    from agent.tools import _resolve_path
+    source = str(args.get("source", ""))
+    destination = str(args.get("destination", ""))
+    try:
+        src = _resolve_path(source)
+        dst = _resolve_path(destination)
+    except ValueError as e:
+        return f"file_move: {e}"
+    if not src.exists():
+        return f"file_move: источник {src} не найден"
+    note = f"file_move: {src} → {dst}"
+    if dst.exists():
+        note += f" (перезапишет существующий файл, {dst.stat().st_size:,} байт)"
+    return note
+
+
+def _preview_env_set(args: dict) -> str:
+    from pathlib import Path
+    key = str(args.get("key", ""))
+    value = str(args.get("value", ""))
+    env_path = Path(".env")
+    old = None
+    if env_path.exists():
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            if line.strip().startswith(f"{key}="):
+                old = line.split("=", 1)[1]
+                break
+    if old is None:
+        return f"system_env_set: добавит новую переменную {key}={value!r}"
+    return f"system_env_set: {key}: {old!r} → {value!r}"
 
 
 def _preview_process_kill(args: dict) -> str:
