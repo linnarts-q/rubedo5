@@ -3,14 +3,29 @@ import json
 import logging
 from datetime import datetime
 from llm.groq import chat as groq_chat
+from agent.tool_categories import CATEGORY_NAMES
 
 log = logging.getLogger("rubedo.classifier")
 
 _VALID_ROUTES = {"skill", "simple", "deep", "command"}
 _VALID_CONTEXTS = {"task", "plan", "info", "chat", "emotional", "urgent", "day_review"}
 _VALID_SKILLS = {"weather", "reminder", "system", "logs", "music", "news"}
+_VALID_CATEGORIES = set(CATEGORY_NAMES)
 
-_CLASSIFY = """Classify the user message. Return strictly JSON (no markdown).
+_CATEGORY_DESCRIPTIONS = """Tool categories (pick every one the message plausibly needs — §13, over-including is cheap, missing one isn't):
+- memory: notes, facts about the owner, profile (owner/self), searching memory
+- tasks: today's tasks, reminders, week events, recurring tasks, alarm
+- queue: autonomous task queue, untimed backlog (pool)
+- files: read/write/archive/convert files in the workspace
+- web: web search, weather, navigation, calculator, research
+- system: system diagnostics, shell/sudo/python exec, processes, volume, screenshot
+- server: SpotRent control, commands on the separate server
+- agent_self: self-update/restart, display restart, OS package update
+- diagnostics: recent iterations/audit logs, archiving logs, rolling back the last change
+- send: sending a file/photo to the owner
+- wishes: Rubedo's own wish list"""
+
+_CLASSIFY = f"""Classify the user message. Return strictly JSON (no markdown).
 
 Routes:
 - skill: deterministic action matching an available skill topic
@@ -53,8 +68,11 @@ Populate when:
 - Research/analysis request with extremely vague scope → focused questions
 Do NOT populate for: task management, reminders, chat, commands, any request with enough context.
 
+{_CATEGORY_DESCRIPTIONS}
+For route=chat/emotional with no concrete action, tool_categories can be empty — those routes get no tools regardless (§11).
+
 Return JSON only:
-{\"route\": \"skill|simple|deep|command\", \"context\": \"task|plan|info|chat|emotional|urgent|day_review\", \"intent\": \"brief description in Russian\", \"skill\": \"weather|reminder|system|logs|music|news|null\", \"missing_info\": []}
+{{\"route\": \"skill|simple|deep|command\", \"context\": \"task|plan|info|chat|emotional|urgent|day_review\", \"intent\": \"brief description in Russian\", \"skill\": \"weather|reminder|system|logs|music|news|null\", \"missing_info\": [], \"tool_categories\": []}}
 """
 
 
@@ -103,6 +121,22 @@ async def classify(message: str, history: list | None = None) -> dict:
             q for q in result["missing_info"] if isinstance(q, str) and q.strip()
         ]
 
+        # tool_categories (§13) — chat/emotional legitimately want an
+        # empty list (executor gets no tools regardless, per §11 layer
+        # 3). Anything else with an empty/invalid list is treated as
+        # under-classification, not a deliberate "no tools needed" — a
+        # missing category silently starves the model of a real tool,
+        # which is worse than a few thousand unnecessary prompt tokens,
+        # so the safe default on doubt is "give everything".
+        cats = result.get("tool_categories")
+        if not isinstance(cats, list):
+            cats = []
+        cats = [c for c in cats if isinstance(c, str) and c in _VALID_CATEGORIES]
+        if not cats and result["context"] not in ("chat", "emotional"):
+            log.debug("[classify] no valid tool_categories, defaulting to all")
+            cats = list(_VALID_CATEGORIES)
+        result["tool_categories"] = cats
+
         log.info(
             f"[classify] «{message[:60]}» → route={result.get('route')} "
             f"context={result.get('context')} skill={result.get('skill')} | {result.get('intent', '')[:60]}"
@@ -110,7 +144,10 @@ async def classify(message: str, history: list | None = None) -> dict:
         return result
     except Exception as e:
         log.warning(f"Classifier failed ({type(e).__name__}): {e}, defaulting simple/chat")
-        return {"route": "simple", "context": "chat", "intent": message, "skill": None, "missing_info": []}
+        return {
+            "route": "simple", "context": "chat", "intent": message, "skill": None,
+            "missing_info": [], "tool_categories": [],
+        }
 
 
 async def extract_clarification_answer(questions: list[str], answer: str) -> str:

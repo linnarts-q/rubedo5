@@ -31,6 +31,8 @@ async def run(
     bus_client,
     max_iterations: int = EXECUTOR_MAX_ITER_DEFAULT,
     audit: AuditLogger | None = None,
+    full_tools_schema: list | None = None,
+    full_tools_map: dict | None = None,
 ) -> tuple[str, list]:
     """OpenAI-compatible tool loop. Returns (final_reply, updated_messages).
 
@@ -40,11 +42,21 @@ async def run(
     call; agent/controller.py intercepts the owner's next message to
     either run it for real or cancel it. Only GREEN tools run inline
     here, same as every tool did before this stage.
+
+    `tools_schema`/`tools_map` are usually the classifier's category
+    pick (§13), not the full ~90-tool set. If the model asks for a real
+    tool that just isn't in that pick, `full_tools_schema`/
+    `full_tools_map` — the complete set, if the caller has one to fall
+    back to — get swapped in for the rest of this run rather than
+    failing outright. Lighter interim version of the spec's "one
+    follow-up category request, then honest refusal"; the fuller
+    version needs the reflective cycle (§3), a later stage.
     """
     history = list(messages)
     tool_counts: dict[str, int] = {}
     exact_counts: dict[str, int] = {}
     first_tool = True
+    _widened = False
 
     for _ in range(max_iterations):
         if audit:
@@ -173,6 +185,16 @@ async def run(
                 continue
 
             fn = tools_map.get(name)
+            if fn is None and not _widened and full_tools_map and name in full_tools_map:
+                log.info(
+                    f"Tool '{name}' not in the loaded categories — widening to "
+                    "the full tool set for the rest of this run"
+                )
+                tools_map = full_tools_map
+                tools_schema = full_tools_schema or tools_schema
+                fn = tools_map.get(name)
+                _widened = True
+
             t_start = time.monotonic()
             if fn is None:
                 result = f"Инструмент '{name}' не найден."

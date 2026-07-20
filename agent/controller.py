@@ -17,7 +17,8 @@ from agent.executor import run as executor_run
 from agent.audit import AuditLogger, check_normal_threshold, NORMAL_DIR
 from agent.prompts import build_gpt_system, build_analytics_system
 from agent.tools import TOOLS_SCHEMA, TOOLS_MAP, set_context
-from agent import approval, stopword
+from agent import approval, stopword, outcomes
+from agent.tool_categories import get_tools_for_categories
 from memory.db import (
     load_history, save_message, load_facts, search_events,
     load_latest_summary, save_summary, save_event, load_recent_events,
@@ -416,6 +417,7 @@ async def handle_message(
     recent_actions = load_recent_events(limit=5)
     summary = load_latest_summary(session_id)
     history = load_history(session_id, limit=HISTORY_LIMIT)
+    history = outcomes.annotate(history)  # §11 layer 1
     day_state = _get_day_state()
     owner_profile = profile_get_all("owner") or None
     self_profile = profile_get_all("self") or None
@@ -466,14 +468,23 @@ async def handle_message(
         send_photo_fn=send_photo_fn,
     )
 
-    # Frozen: no tools at all, conversation only (techspec §15).
-    tools_schema = [] if _frozen else TOOLS_SCHEMA
-    tools_map = {} if _frozen else TOOLS_MAP
+    # Tools-gate (§11 layer 3 + §15): frozen, or a route that's just
+    # conversation (chat/emotional) with nothing to act on, gets no
+    # tools at all — physically can't fire one, not a prompt-level
+    # request to behave. Otherwise, only the classifier's picked
+    # categories (§13) load, with the full set kept on hand so the
+    # executor can widen if the model names a real tool outside them.
+    _no_tools = _frozen or context_type in ("chat", "emotional")
+    if _no_tools:
+        tools_schema, tools_map = [], {}
+    else:
+        tools_schema, tools_map = get_tools_for_categories(route_info.get("tool_categories", []))
 
     try:
         reply, _ = await executor_run(
             messages, tools_schema, tools_map, session_id, bus_client, max_iter,
             audit=audit,
+            full_tools_schema=TOOLS_SCHEMA, full_tools_map=TOOLS_MAP,
         )
         reply = _clean_reply(reply)
     except AllKeysExhausted:
