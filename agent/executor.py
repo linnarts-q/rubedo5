@@ -13,7 +13,7 @@ from agent.idempotency import (
 )
 from agent.audit import AuditLogger
 from agent import zones, approval, sessions, questions
-from llm import openrouter as llm_gen
+from llm.tiers import generation_chat
 from llm.exceptions import AllKeysExhausted
 from bus.events import ToolCalled, ToolFinished, WorkStarted, WorkCompleted, LLMExhausted
 
@@ -73,7 +73,7 @@ async def run(
         if audit:
             audit.llm_request(message_count=len(history), has_tools=True)
         try:
-            response = await llm_gen.chat(history, tools=tools_schema)
+            response = await generation_chat(history, tools=tools_schema)
         except AllKeysExhausted:
             await bus_client.publish(LLMExhausted(session_id=session_id))
             raise
@@ -87,7 +87,7 @@ async def run(
                 if audit:
                     audit.exception("executor.context_trim", str(_e)[:120])
                 try:
-                    response = await llm_gen.chat(history, tools=tools_schema)
+                    response = await generation_chat(history, tools=tools_schema)
                 except Exception as _e2:
                     raise _e2
             else:
@@ -273,7 +273,7 @@ async def run(
 
     await bus_client.publish(WorkCompleted(session_id=session_id))
     try:
-        final = await llm_gen.chat(history)
+        final = await generation_chat(history)
         reply = final.choices[0].message.content or "Готово."
         if audit:
             audit.final_reply(reply)
