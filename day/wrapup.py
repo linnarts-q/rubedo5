@@ -106,13 +106,24 @@ async def run_wrapup(send_fn=None) -> str:
     bundled instead (same "send only if notify_or_bundle says so"
     contract day/pool.py's run_tick already follows). Then confirms the
     day -> evening transition immediately if nothing needs verifying.
-    Returns the generated text regardless of whether it was sent."""
+    Returns the generated text regardless of whether it was sent.
+
+    Passes an always-open window to notify_or_bundle rather than
+    letting it fall back to the generic WAKE_TIME..SLEEP_TIME default:
+    day/tick.py only calls this once the negotiated wrapup_time anchor
+    has actually passed, so that anchor IS the authoritative timing
+    decision here — re-applying a separate generic window on top could
+    contradict a wrapup_time negotiated outside it (mode/phase/day-off
+    restrictions still apply as normal)."""
     import day.phase as phase
     from day.state import get_unverified_today, set_wrapup_done
     from agent import notify
 
     text = await generate_wrapup_text()
-    if notify.notify_or_bundle("normal", text, source="wrapup") and send_fn:
+    delivered = notify.notify_or_bundle(
+        "normal", text, source="wrapup", quiet_start="00:00", quiet_end="23:59",
+    )
+    if delivered and send_fn:
         await send_fn(text)
     set_wrapup_done(True)
 

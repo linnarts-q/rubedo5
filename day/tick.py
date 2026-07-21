@@ -1,10 +1,11 @@
 """Day-engine tick (day-engine 5.0) — the periodic heartbeat that
 drives everything the other day-engine modules (day/phase.py,
 agent/anchors.py, agent/notify.py, day/wrapup.py, day/planner.py,
-day/pool.py) left as plain, independently-callable functions this
-session: silence-based phase transitions, the wake alarm, the evening
-anchor negotiation, and firing the briefing/wrapup once their
-negotiated times actually arrive.
+day/pool.py, agent/queue_runner.py) left as plain, independently-
+callable functions this session: silence-based phase transitions, the
+wake alarm, the evening anchor negotiation, firing the briefing/wrapup
+once their negotiated times actually arrive, and giving the queue
+runner (§2 infrastructure) somewhere to attach to.
 
 Not wired into a live process yet — nothing in this repo currently
 runs an actual scheduler (interface/telegram.py, the entry point that
@@ -27,6 +28,7 @@ import day.wrapup as wrapup
 import day.planner as planner
 import day.pool as pool
 from agent import anchors
+from agent.queue_runner import run_queue_tick
 
 log = logging.getLogger("rubedo.day.tick")
 
@@ -92,7 +94,14 @@ async def _check_wake_alarm(send_fn) -> None:
 
 
 async def _check_evening_negotiation(send_fn) -> None:
-    """Once per evening, propose tomorrow's anchor times."""
+    """Once per evening, propose tomorrow's anchor times.
+
+    Passes an always-open window to notify_or_bundle rather than the
+    generic WAKE_TIME..SLEEP_TIME default: entering "evening" phase (a
+    real event, not a clock check) is already the timing decision here
+    — evening can legitimately start after SLEEP_TIME on a late night,
+    and the proposal shouldn't be silently suppressed by a second,
+    unrelated generic window (mode/day-off restrictions still apply)."""
     if phase.current() != "evening":
         return
     from memory.db import load_meta, save_meta
@@ -103,7 +112,10 @@ async def _check_evening_negotiation(send_fn) -> None:
     if load_meta(proposed_key) == "1":
         return
     text = anchors.propose_tonight()
-    if notify.notify_or_bundle("normal", text, source="anchor_negotiation") and send_fn:
+    delivered = notify.notify_or_bundle(
+        "normal", text, source="anchor_negotiation", quiet_start="00:00", quiet_end="23:59",
+    )
+    if delivered and send_fn:
         await send_fn(text)
     save_meta(proposed_key, "1")
 
@@ -147,3 +159,4 @@ async def run_day_tick(tg_client, owner_id: int) -> None:
     await _check_wrapup(send_fn)
     await _check_evening_negotiation(send_fn)
     await pool.run_tick(tg_client, owner_id)
+    await run_queue_tick()

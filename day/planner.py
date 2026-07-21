@@ -98,12 +98,22 @@ async def run_briefing(send_fn=None) -> str:
     bundled instead. Doesn't touch phase itself — the night -> morning
     transition is on_wake_confirmed() (day/phase.py), a separate event
     this doesn't fire; the briefing is content delivered once that
-    phase is already active."""
+    phase is already active.
+
+    Passes an always-open window to notify_or_bundle rather than the
+    generic WAKE_TIME..SLEEP_TIME default: day/tick.py only calls this
+    once the negotiated briefing_time anchor has passed, so that anchor
+    is the authoritative timing decision — a separate generic window on
+    top could contradict a briefing_time negotiated outside it
+    (mode/phase/day-off restrictions still apply as normal)."""
     from agent import notify
     from day.state import set_briefing_done
 
     text = await generate_briefing_text()
-    if notify.notify_or_bundle("normal", text, source="briefing") and send_fn:
+    delivered = notify.notify_or_bundle(
+        "normal", text, source="briefing", quiet_start="00:00", quiet_end="23:59",
+    )
+    if delivered and send_fn:
         await send_fn(text)
     set_briefing_done(True)
     return text
