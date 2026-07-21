@@ -39,6 +39,7 @@ construction.
 """
 from __future__ import annotations
 
+import contextvars
 import logging
 
 from memory.db import (
@@ -51,6 +52,27 @@ from memory.writer import write as _writer_write
 log = logging.getLogger("rubedo.agent.sessions")
 
 _TERMINAL = {"done", "failed", "cancelled"}
+
+# Which task session the *currently executing tool call* belongs to
+# (§2 phase 2 parallelism). agent/executor.py sets this for the
+# duration of one run() call; asyncio Tasks each get their own copy of
+# a contextvar, so two genuinely concurrent sessions never see each
+# other's value — unlike a plain module-level global, which would be
+# shared mutable state two interleaved coroutines could clobber.
+# asyncio.to_thread also propagates the current context into the
+# thread it spawns, so this is safe for the sync tool functions in
+# agent/tools/*.py too (they run via asyncio.to_thread).
+_current_session_id: contextvars.ContextVar[int | None] = contextvars.ContextVar(
+    "current_task_session_id", default=None
+)
+
+
+def set_current(session_id: int | None) -> contextvars.Token:
+    return _current_session_id.set(session_id)
+
+
+def reset_current(token: contextvars.Token) -> None:
+    _current_session_id.reset(token)
 
 
 def _log(session_id: int, kind: str, content: str) -> None:
@@ -77,7 +99,13 @@ def _revive_experience(session_id: int, success: bool) -> None:
 
 def start(title: str, origin: str = "chat") -> dict:
     """Start a new task session. If one is already active, pause it
-    first — phase 1 is sequential, only one session runs at a time."""
+    first — phase 1 is sequential, only one session runs at a time.
+
+    Superseded by agent.scheduler.start_session() (§2 phase 2) at both
+    real call sites (agent/controller.py, agent/queue_runner.py) now
+    that two sessions can be genuinely concurrent; kept here as the
+    plain sequential primitive it always was, in case something needs
+    exactly that later."""
     current = session_get_active()
     if current:
         log.info(f"Pausing session #{current['id']} ({current['title']!r}) to start {title!r}")
@@ -85,6 +113,37 @@ def start(title: str, origin: str = "chat") -> dict:
     sid = session_create(title, origin=origin)
     _log(sid, "start", title)
     return session_get(sid)
+
+
+def create(title: str, origin: str, tags: list[str] | None = None, status: str = "active") -> dict:
+    """Low-level session creation with no pausing/displacement logic of
+    its own — agent/scheduler.py is what decides whether anything needs
+    pausing and what `status` a new session should start at ('active',
+    or 'waiting_dependency' for a queue session blocked before it ever
+    ran). Plain start() stays the all-in-one sequential convenience."""
+    sid = session_create(title, origin=origin, status=status, resource_tags=tags)
+    _log(sid, "start" if status == "active" else "queued_waiting", title)
+    return session_get(sid)
+
+
+def activate_waiting(session_id: int | None) -> dict | None:
+    """Promote a session out of 'waiting_dependency' once its blocker
+    (a resource-tag conflict or a full concurrency slot, agent/
+    scheduler.py) has cleared. Distinct from resume(): that un-pauses a
+    session that already ran and was displaced; this is for a session
+    that never started running at all."""
+    if session_id is None:
+        return None
+    s = session_get(session_id)
+    if not s or s["status"] != "waiting_dependency":
+        return None
+    session_set_status(session_id, "active")
+    _log(session_id, "unblocked", "разблокирована планировщиком")
+    return session_get(session_id)
+
+
+def list_active() -> list[dict]:
+    return _session_list("active", limit=50)
 
 
 def pause(session_id: int | None, reason: str = "") -> None:
@@ -145,6 +204,16 @@ def log_decision(session_id: int | None, kind: str, content: str) -> None:
 
 
 def active() -> dict | None:
+    """The task session for the current tool-call context if one's set
+    (agent/executor.py, for the duration of one run() call), otherwise
+    the single most-recently-active row in the DB — that fallback is
+    only correct when at most one session is active system-wide, so
+    callers outside an executor.run() context (queue_runner's tick-level
+    scheduling decisions) must not rely on it once two sessions can be
+    active at once; they should query memory.db.session_list directly."""
+    sid = _current_session_id.get()
+    if sid is not None:
+        return session_get(sid)
     return session_get_active()
 
 

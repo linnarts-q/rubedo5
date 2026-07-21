@@ -104,6 +104,11 @@ HISTORY_LIMIT = 20
 SUMMARIZE_EVERY = 10
 MAX_TOOL_ITERATIONS = 30
 
+# Session parallelism (§2 phase 2, rollout step 2) — at most this many
+# task sessions 'active' at once. Bump to 3 only after a week stable on
+# 2, per the spec's own rollout order; not meant to be tuned casually.
+MAX_CONCURRENT_SESSIONS = _int("MAX_CONCURRENT_SESSIONS", 2)
+
 # Executor budgets (per agent-run)
 EXECUTOR_MAX_ITER_SIMPLE = _int("EXECUTOR_MAX_ITER_SIMPLE", 8)
 EXECUTOR_MAX_ITER_DEEP = _int("EXECUTOR_MAX_ITER_DEEP", 20)

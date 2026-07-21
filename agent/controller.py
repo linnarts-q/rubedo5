@@ -17,7 +17,7 @@ from agent.executor import run as executor_run
 from agent.audit import AuditLogger, check_normal_threshold, NORMAL_DIR
 from agent.prompts import build_gpt_system, build_analytics_system
 from agent.tools import TOOLS_SCHEMA, TOOLS_MAP, set_context
-from agent import approval, stopword, outcomes, sessions, questions, anchors
+from agent import approval, stopword, outcomes, sessions, questions, anchors, scheduler, resources
 from agent.reflect import reflect_on_failure
 from agent.verify import find_unacknowledged_failures
 from agent.tool_categories import get_tools_for_categories
@@ -515,8 +515,12 @@ async def handle_message(
             await send_fn("Приступаю к задаче — это займёт немного времени.")
         # Task session (§2 phase 1) — only "deep", multi-step work gets
         # one; "simple" tool turns and pure chat stay unsessioned by
-        # design (see agent/sessions.py docstring).
-        _tsess = sessions.start(intent or text, origin="chat")
+        # design (see agent/sessions.py docstring). agent.scheduler
+        # (§2 phase 2) decides what (if anything) gets paused to make
+        # room — Lin's task always goes active, resource tags derived
+        # from the same tool_categories the classifier already picked.
+        _deep_tags = resources.tags_for_categories(route_info.get("tool_categories", []))
+        _tsess = scheduler.start_session(intent or text, origin="chat", tags=_deep_tags)
         task_session_id = _tsess["id"]
         if steps:
             sessions.log_decision(task_session_id, "plan", plan_text)

@@ -12,7 +12,7 @@ from agent.idempotency import (
     is_side_effect, DUPLICATE_BLOCK_MESSAGE, check_cooldown, mark_called,
 )
 from agent.audit import AuditLogger
-from agent import zones, approval, sessions, questions
+from agent import zones, approval, sessions, questions, hanging
 from llm.tiers import generation_chat
 from llm.exceptions import AllKeysExhausted
 from bus.events import ToolCalled, ToolFinished, WorkStarted, WorkCompleted, LLMExhausted
@@ -23,7 +23,22 @@ EXACT_DUPLICATE_LIMIT = EXECUTOR_EXACT_DUPLICATE_LIMIT
 _TOOL_TIMEOUT = float(EXECUTOR_TOOL_TIMEOUT_SEC)
 
 
-async def run(
+async def run(*args, task_session_id: int | None = None, **kwargs) -> tuple[str, list]:
+    """Thin wrapper around `_run_inner`: sets agent.sessions' current-
+    session contextvar for the duration of this tool loop, so plan()/
+    report() (agent/tools/sessions.py) — which have no other way to
+    know which task session their call belongs to — read the right one
+    even when a second session is genuinely concurrent (§2 phase 2).
+    Always reset, success or exception, so it can never leak into
+    whatever runs next on this same asyncio Task."""
+    token = sessions.set_current(task_session_id)
+    try:
+        return await _run_inner(*args, task_session_id=task_session_id, **kwargs)
+    finally:
+        sessions.reset_current(token)
+
+
+async def _run_inner(
     messages: list,
     tools_schema: list,
     tools_map: dict,
@@ -35,6 +50,7 @@ async def run(
     full_tools_map: dict | None = None,
     task_session_id: int | None = None,
     tool_categories: list[str] | None = None,
+    resumable_on_pause: bool = False,
 ) -> tuple[str, list]:
     """OpenAI-compatible tool loop. Returns (final_reply, updated_messages).
 
@@ -62,6 +78,16 @@ async def run(
     no-op in that case, so plain "simple" turns pay nothing extra.
     `tool_categories` is only needed alongside `task_session_id`, so an
     `ask_user` pause can be resumed later with the same tool set.
+
+    `resumable_on_pause` (§2 phase 2) — set only by agent/queue_runner.py.
+    A queue session can be paused by someone else entirely mid-run (a
+    chat task displacing it via agent/scheduler.py) while this loop is
+    still live; when that happens, this run stashes its in-flight
+    history via agent/hanging.py (kind "session_displaced") instead of
+    just abandoning it, so a later tick can resume the exact same
+    reasoning rather than starting the task over. Chat-lane calls leave
+    this False: a displaced chat session was Lin starting a new
+    conversation, not something to auto-resume later.
     """
     history = list(messages)
     tool_counts: dict[str, int] = {}
@@ -70,6 +96,32 @@ async def run(
     _widened = False
 
     for _ in range(max_iterations):
+        # §2 phase 2: with two sessions genuinely concurrent, this run's
+        # own session can be paused by someone else entirely (agent/
+        # scheduler.py displacing an active queue session for a chat
+        # task) while this loop is still executing — pause() only
+        # updates the DB, it can't reach into a live coroutine. Checked
+        # once per round-trip (not more often — coarse is fine here) so
+        # a displaced run notices and stops instead of finishing and
+        # calling sessions.complete()/fail(), which would silently
+        # overwrite the pause. Bounded, not instant: at most one more
+        # full round of tool calls can land on a paused session.
+        if task_session_id is not None:
+            _live = sessions.get(task_session_id)
+            if _live and _live["status"] == "paused":
+                log.info(f"Session #{task_session_id} paused externally — halting mid-run")
+                if resumable_on_pause:
+                    hanging.create(
+                        "session_displaced",
+                        {
+                            "task_session_id": task_session_id,
+                            "history": history,
+                            "tool_categories": tool_categories or [],
+                            "max_iterations": max_iterations,
+                        },
+                        task_session_id=task_session_id,
+                    )
+                return "", history
         if audit:
             audit.llm_request(message_count=len(history), has_tools=True)
         try:

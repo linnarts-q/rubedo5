@@ -270,6 +270,7 @@ def init_db():
                 started_at TEXT,
                 completed_at TEXT
             );
+            ALTER TABLE rubedo_queue ADD COLUMN IF NOT EXISTS session_id INTEGER;
             CREATE TABLE IF NOT EXISTS rubedo_queue_recurring (
                 id SERIAL PRIMARY KEY,
                 title TEXT NOT NULL,
@@ -306,6 +307,7 @@ def init_db():
                 result TEXT,
                 error TEXT
             );
+            ALTER TABLE task_sessions ADD COLUMN IF NOT EXISTS resource_tags TEXT;
             CREATE INDEX IF NOT EXISTS task_sessions_status_idx ON task_sessions (status);
             CREATE TABLE IF NOT EXISTS session_decisions (
                 id SERIAL PRIMARY KEY,
@@ -800,7 +802,7 @@ def load_meta(key: str) -> str | None:
 
 # ─ Rubedo Queue ──────────────────────────────────────────────────────────────
 
-_QUEUE_COLS = "id, title, description, status, priority, scheduled_at, depends_on, max_retries, retry_count, result, error, created_at, started_at, completed_at"
+_QUEUE_COLS = "id, title, description, status, priority, scheduled_at, depends_on, max_retries, retry_count, result, error, created_at, started_at, completed_at, session_id"
 
 
 def queue_add(
@@ -866,11 +868,24 @@ def queue_is_running() -> bool:
     return row is not None
 
 
-def queue_mark_running(task_id: int) -> None:
+def queue_get_running() -> dict | None:
+    """The single claimed-in-flight task, if any (§2 phase 2) — the
+    runner only ever claims one at a time, so at most one row can be
+    'running', whether its session is actively executing or sitting
+    blocked in 'waiting_dependency' waiting for agent.scheduler to
+    unblock it."""
+    with get_conn() as conn:
+        row = conn.execute(
+            f"SELECT {_QUEUE_COLS} FROM rubedo_queue WHERE status='running' LIMIT 1"
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def queue_mark_running(task_id: int, session_id: int | None = None) -> None:
     with get_conn() as conn:
         conn.execute(
-            "UPDATE rubedo_queue SET status='running', started_at=%s WHERE id=%s",
-            (_now(), task_id),
+            "UPDATE rubedo_queue SET status='running', started_at=%s, session_id=%s WHERE id=%s",
+            (_now(), session_id, task_id),
         )
 
 
@@ -892,7 +907,8 @@ def queue_mark_failed(task_id: int, error: str = "") -> bool:
         new_count = retry_count + 1
         if new_count <= max_retries:
             conn.execute(
-                "UPDATE rubedo_queue SET status='pending', retry_count=%s, error=%s, started_at=NULL WHERE id=%s",
+                "UPDATE rubedo_queue SET status='pending', retry_count=%s, error=%s, "
+                "started_at=NULL, session_id=NULL WHERE id=%s",
                 (new_count, error, task_id),
             )
             return True
@@ -1049,13 +1065,25 @@ def profile_get_all(entity: str) -> dict[str, str]:
 
 # ─ Task sessions (techspec §2, phase 1: pause/sequential + decision journal) ─
 
-def session_create(title: str, origin: str | None = None) -> int:
+def session_create(
+    title: str, origin: str | None = None,
+    status: str = "active", resource_tags: list | None = None,
+) -> int:
+    """`status` lets the scheduler (agent/scheduler.py, §2 phase 2)
+    create a session directly as 'waiting_dependency' — blocked by a
+    resource-tag conflict or a full concurrency slot before it ever
+    runs — instead of always starting 'active'. `resource_tags` is the
+    coarse tag list (agent/resources.py) the scheduler uses to detect
+    conflicts between concurrently-active sessions; stored as a JSON
+    array, same convention as events.tags."""
+    import json
     now = _now()
+    tags_json = json.dumps(resource_tags or [], ensure_ascii=False)
     with get_conn() as conn:
         row = conn.execute(
-            "INSERT INTO task_sessions (title, status, origin, created_at, updated_at) "
-            "VALUES (%s, 'active', %s, %s, %s) RETURNING id",
-            (title, origin, now, now),
+            "INSERT INTO task_sessions (title, status, origin, resource_tags, created_at, updated_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
+            (title, status, origin, tags_json, now, now),
         ).fetchone()
         return row["id"]
 
