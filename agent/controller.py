@@ -266,6 +266,65 @@ async def handle_message(
         # message normally (owner may be asking something about it, or
         # about something else entirely).
 
+    # Crash-recovery confirmation (§2 phase 2 — crash isolation,
+    # agent/crash_recovery.py) — "перезапустилась, продолжить?" for
+    # whatever chat-origin session(s) the last crash orphaned. Yes ->
+    # resume each and re-enter the executor loop with a reconstructed
+    # context (the original raw history died with the crashed process;
+    # only the durable journal survives, so this can't just replay the
+    # old messages the way an ask_user resume does — it starts a fresh
+    # run seeded with the session's own crash-recovery note, which
+    # already carries the interrupted step's read/write verdict). No ->
+    # cancel each, nothing to resume.
+    if _target is not None and _target["kind"] == "crash_resume":
+        _crash_payload = _target["payload"]
+        _crash_sids = _crash_payload.get("session_ids", [])
+        confirmed = approval.is_confirmation(text)
+        if confirmed is True:
+            hanging.resolve(_target["hanging_id"], "answered")
+            if not skip_save_user:
+                save_message(session_id, "user", text)
+            for _csid in _crash_sids:
+                resumed = sessions.resume(_csid)
+                if not resumed:
+                    continue
+                _cs = sessions.get(_csid)
+                _cj = sessions.journal(_csid)
+                _crash_note = next((e["content"] for e in reversed(_cj) if e["kind"] == "crash_recovery"), "")
+                restart_text = (
+                    f"[Продолжение после сбоя. Задача: {_cs['title']}. {_crash_note} "
+                    "Прежде чем повторять любое действие с побочным эффектом — проверь, "
+                    "не выполнилось ли оно уже.]"
+                )
+                try:
+                    reply, _ = await executor_run(
+                        [{"role": "user", "content": restart_text}], TOOLS_SCHEMA, TOOLS_MAP,
+                        session_id, bus_client, EXECUTOR_MAX_ITER_DEFAULT,
+                        audit=audit, full_tools_schema=TOOLS_SCHEMA, full_tools_map=TOOLS_MAP,
+                        task_session_id=_csid, tool_categories=[],
+                    )
+                    reply = _clean_reply(reply)
+                except Exception as e:
+                    reply = "Не получилось продолжить после сбоя, попробуй ещё раз."
+                    sessions.fail(_csid, f"{type(e).__name__}: {e}")
+                await send_fn(reply)
+                save_message(session_id, "assistant", reply)
+            await bus_client.publish(AgentReplied(session_id=session_id))
+            return
+        if confirmed is False:
+            hanging.resolve(_target["hanging_id"], "answered")
+            if not skip_save_user:
+                save_message(session_id, "user", text)
+            for _csid in _crash_sids:
+                sessions.cancel(_csid, reason="владелец решил не продолжать после сбоя")
+            reply = "Хорошо, не продолжаю."
+            await send_fn(reply)
+            save_message(session_id, "assistant", reply)
+            await bus_client.publish(AgentReplied(session_id=session_id))
+            return
+        # Not a recognizable yes/no — leave it pending, handle this
+        # message normally.
+
     # Intercept a session question answer (§2 phase 1, `ask_user` tool)
     # — a task session paused mid-reasoning waiting on a free-text
     # answer. Resuming means continuing the SAME executor run with the

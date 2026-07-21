@@ -348,6 +348,11 @@ def init_db():
                 created_at TEXT NOT NULL,
                 delivered_at TEXT
             );
+            CREATE TABLE IF NOT EXISTS agent_state (
+                id INTEGER PRIMARY KEY DEFAULT 1,
+                heartbeat_at TEXT,
+                clean_shutdown BOOLEAN NOT NULL DEFAULT FALSE
+            );
             CREATE INDEX IF NOT EXISTS notification_bundle_pending_idx
                 ON notification_bundle (delivered_at);
         """)
@@ -921,6 +926,19 @@ def queue_mark_running(task_id: int, session_id: int | None = None) -> None:
         )
 
 
+def queue_requeue_after_crash(task_id: int) -> None:
+    """Put a claimed-but-orphaned task back to 'pending' with no
+    penalty (retry_count untouched) — a crash isn't the task's own
+    failure, and re-running an autonomous task from scratch is cheap
+    (agent/crash_recovery.py's resume protocol), unlike re-litigating a
+    chat session's in-flight reasoning with Lin."""
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE rubedo_queue SET status='pending', started_at=NULL, session_id=NULL WHERE id=%s",
+            (task_id,),
+        )
+
+
 def queue_mark_done(task_id: int, result: str = "") -> None:
     with get_conn() as conn:
         conn.execute(
@@ -1338,3 +1356,34 @@ def list_experience_by_date(target_date: str) -> list[dict]:
             "SELECT * FROM experience WHERE date=%s ORDER BY id ASC", (target_date,)
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ─ Agent state (crash isolation, §2 phase 2) ───────────────────────────
+# Single row (id=1). heartbeat_at is stamped on every tick by whatever
+# process drives day/tick.py (not wired to a live one yet, same as the
+# rest of the day-engine); clean_shutdown flips true only right before
+# a graceful exit. agent/crash_recovery.py reads both at startup to
+# tell "the previous run ended on purpose" from "it just stopped".
+
+def agent_heartbeat() -> None:
+    now = _now()
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO agent_state (id, heartbeat_at, clean_shutdown) VALUES (1, %s, FALSE) "
+            "ON CONFLICT (id) DO UPDATE SET heartbeat_at=%s, clean_shutdown=FALSE",
+            (now, now),
+        )
+
+
+def agent_mark_clean_shutdown() -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO agent_state (id, clean_shutdown) VALUES (1, TRUE) "
+            "ON CONFLICT (id) DO UPDATE SET clean_shutdown=TRUE",
+        )
+
+
+def agent_state_get() -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM agent_state WHERE id=1").fetchone()
+    return dict(row) if row else None

@@ -72,6 +72,51 @@ def snapshot_before_write(target: Path) -> None:
     }))
 
 
+def verify_last_write(filename_hint: str = "") -> str | None:
+    """Read-only check of whether the most recently snapshotted yellow-
+    zone file_write/file_delete actually landed, by comparing the
+    target's current state against what was captured right before it
+    ran (agent/crash_recovery.py — an interrupted write step must be
+    verified, never blindly redone, §15's undo snapshot is exactly the
+    "compare with reality, not guess" this needs).
+
+    `filename_hint` is a loose sanity check, not a database key — this
+    module only ever remembers the single most recent snapshot, so if
+    it doesn't look like it belongs to the step being checked, this
+    returns None (verification unavailable) rather than reporting on
+    the wrong file. None also covers: no snapshot at all, snapshot
+    pruned past TTL, or nothing green-zone/red-zone (§15 only
+    snapshots yellow-zone file writes to begin with)."""
+    from memory.db import load_meta
+
+    raw = load_meta(_META_LAST)
+    if not raw:
+        return None
+    try:
+        info = json.loads(raw)
+    except Exception:
+        return None
+
+    target_str = info.get("target", "")
+    if filename_hint and filename_hint not in target_str and target_str not in filename_hint:
+        return None
+
+    target = Path(target_str)
+    if info.get("kind") == "created":
+        return "похоже, выполнилась (файл создан)" if target.exists() else "похоже, не выполнилась — файла ещё нет"
+
+    snap_path = Path(info.get("snapshot", ""))
+    if not snap_path.exists():
+        return None
+    if not target.exists():
+        return "похоже, выполнилась — файл удалён/перемещён"
+    try:
+        same = target.read_bytes() == snap_path.read_bytes()
+    except Exception:
+        return None
+    return "похоже, НЕ выполнилась — файл не изменился с последнего снапшота" if same else "похоже, выполнилась — содержимое изменилось"
+
+
 def rollback_last() -> str:
     """Undo the most recent yellow-zone file_write/file_delete."""
     from memory.db import load_meta, save_meta

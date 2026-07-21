@@ -292,6 +292,18 @@ async def _run_inner(
                 fn = tools_map.get(name)
                 _widened = True
 
+            # Step-level checkpointing (crash isolation, §2 phase 2) —
+            # committed to Postgres right before the tool actually runs,
+            # not just at pause/resume. A session's last journal entry
+            # being "step_started" with no matching "tool_call" after it
+            # is exactly how a restart tells "this step was still
+            # in-flight when the process died" from "it finished
+            # cleanly" — see agent/crash_recovery.py.
+            sessions.log_decision(
+                task_session_id, "step_started",
+                f"{tc.id} {name}({json.dumps(args, ensure_ascii=False)})",
+            )
+
             t_start = time.monotonic()
             if fn is None:
                 result = f"Инструмент '{name}' не найден."
@@ -325,7 +337,7 @@ async def _run_inner(
             history.append({"role": "tool", "tool_call_id": tc.id, "content": str(result)})
             sessions.log_decision(
                 task_session_id, "tool_call",
-                f"{name}({json.dumps(args, ensure_ascii=False)}) -> {str(result)[:200]}",
+                f"{tc.id} {name}({json.dumps(args, ensure_ascii=False)}) -> {str(result)[:200]}",
             )
 
     await bus_client.publish(WorkCompleted(session_id=session_id))

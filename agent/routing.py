@@ -56,15 +56,15 @@ from memory.db import message_binding_get
 log = logging.getLogger("rubedo.agent.routing")
 
 _BRIEF_LEN = 100
-_KINDS = ("approval", "ask_user")
+_KINDS = ("approval", "ask_user", "crash_resume")
 
 
 def pending_items() -> list[dict]:
-    """Every pending approval/ask_user hanging row, oldest first (a
-    stable, deterministic order for indexing in the disambiguation
-    prompt and the numbered question). Sweeps TTL-expired items first
-    (agent.hanging.list_pending), same as approval.pending()/
-    questions.pending() always did."""
+    """Every pending approval/ask_user/crash_resume hanging row, oldest
+    first (a stable, deterministic order for indexing in the
+    disambiguation prompt and the numbered question). Sweeps TTL-
+    expired items first (agent.hanging.list_pending), same as
+    approval.pending()/questions.pending() always did."""
     items: list[dict] = []
     for kind in _KINDS:
         items.extend(hanging.list_pending(kind))
@@ -81,6 +81,8 @@ def _payload(item: dict) -> dict:
 
 def _brief(item: dict) -> str:
     payload = _payload(item)
+    if item["kind"] == "crash_resume":
+        return "перезапуск после сбоя: " + "; ".join(payload.get("briefs", []))
     detail = (payload.get("question") or payload.get("preview") or "").strip()
     detail = detail.replace("\n", " ")[:_BRIEF_LEN]
     title = ""
