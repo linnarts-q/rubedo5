@@ -73,8 +73,9 @@ def delete_memory(event_id: int) -> str:
 
 def save_fact(content: str) -> str:
     import memory.db as db
+    from memory.writer import write as _writer_write
     from agent.tools import _session_id
-    db.save_fact(content, owner=_session_id)
+    _writer_write(db.save_fact, content, owner=_session_id)
     return "Факт сохранён."
 
 

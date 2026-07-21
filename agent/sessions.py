@@ -29,6 +29,13 @@ It exists for two reasons:
    the goal's "analyzes its own mistakes" needs, and the retrieval half
    of memory layer 4 (§11): real search over structured past attempts,
    not fuzzy title-matching against ephemeral chat history.
+
+Every write to the decision journal or the experience table goes
+through memory.writer's single-writer lock (§2 phase 2 parallelism,
+rollout step 1) rather than calling memory.db directly — proven at
+MAX_CONCURRENT=1, before session parallelism itself exists, so a
+future second concurrent session can't race on these writes by
+construction.
 """
 from __future__ import annotations
 
@@ -39,10 +46,15 @@ from memory.db import (
     session_list as _session_list, session_log, session_journal as _session_journal,
     save_experience,
 )
+from memory.writer import write as _writer_write
 
 log = logging.getLogger("rubedo.agent.sessions")
 
 _TERMINAL = {"done", "failed", "cancelled"}
+
+
+def _log(session_id: int, kind: str, content: str) -> None:
+    _writer_write(session_log, session_id, kind, content)
 
 
 def _revive_experience(session_id: int, success: bool) -> None:
@@ -58,7 +70,7 @@ def _revive_experience(session_id: int, success: bool) -> None:
             e["content"].split(" -> ", 1)[0] for e in entries if e["kind"] == "tool_call"
         )
         outcome = (s.get("result") or s.get("error") or "")[:300]
-        save_experience(s["title"], chain, outcome, success=success)
+        _writer_write(save_experience, s["title"], chain, outcome, success=success)
     except Exception as e:
         log.debug(f"experience revival skipped for session #{session_id}: {e}")
 
@@ -71,7 +83,7 @@ def start(title: str, origin: str = "chat") -> dict:
         log.info(f"Pausing session #{current['id']} ({current['title']!r}) to start {title!r}")
         pause(current["id"], reason=f"вытеснена новой задачей: {title}")
     sid = session_create(title, origin=origin)
-    session_log(sid, "start", title)
+    _log(sid, "start", title)
     return session_get(sid)
 
 
@@ -79,7 +91,7 @@ def pause(session_id: int | None, reason: str = "") -> None:
     if session_id is None:
         return
     session_set_status(session_id, "paused")
-    session_log(session_id, "pause", reason or "приостановлена")
+    _log(session_id, "pause", reason or "приостановлена")
 
 
 def resume(session_id: int | None) -> dict | None:
@@ -92,7 +104,7 @@ def resume(session_id: int | None) -> dict | None:
     if not s or s["status"] != "paused":
         return None
     session_set_status(session_id, "active")
-    session_log(session_id, "resume", "возобновлена")
+    _log(session_id, "resume", "возобновлена")
     return session_get(session_id)
 
 
@@ -100,7 +112,7 @@ def complete(session_id: int | None, result: str = "") -> None:
     if session_id is None:
         return
     session_set_status(session_id, "done", result=result)
-    session_log(session_id, "complete", result or "готово")
+    _log(session_id, "complete", result or "готово")
     _revive_experience(session_id, success=True)
 
 
@@ -108,7 +120,7 @@ def fail(session_id: int | None, error: str) -> None:
     if session_id is None:
         return
     session_set_status(session_id, "failed", error=error)
-    session_log(session_id, "fail", error)
+    _log(session_id, "fail", error)
     _revive_experience(session_id, success=False)
 
 
@@ -116,7 +128,7 @@ def cancel(session_id: int | None, reason: str = "") -> None:
     if session_id is None:
         return
     session_set_status(session_id, "cancelled", result=reason)
-    session_log(session_id, "cancel", reason or "отменена")
+    _log(session_id, "cancel", reason or "отменена")
 
 
 def log_decision(session_id: int | None, kind: str, content: str) -> None:
@@ -127,7 +139,7 @@ def log_decision(session_id: int | None, kind: str, content: str) -> None:
     if session_id is None:
         return
     try:
-        session_log(session_id, kind, content)
+        _log(session_id, kind, content)
     except Exception as e:
         log.debug(f"log_decision skipped: {e}")
 
