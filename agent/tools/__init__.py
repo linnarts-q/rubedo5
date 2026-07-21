@@ -41,6 +41,9 @@ from agent.tools.notify import (  # noqa: E402  (re-export)
 from agent.tools.prflow import (  # noqa: E402  (re-export)
     propose_code_change,
 )
+from agent.tools.display import (  # noqa: E402  (re-export)
+    set_background,
+)
 
 log = logging.getLogger("rubedo.tools")
 
@@ -1130,6 +1133,7 @@ TOOLS_MAP: dict[str, callable] = {
     "agent_update": self_update,
     "agent_restart": restart_agent,
     "display_restart": restart_display,
+    "display_set_background": set_background,
     "os_update": system_update,
     # singletons (no namespace)
     "navigate": navigate,
@@ -1609,6 +1613,10 @@ TOOLS_SCHEMA: list[dict] = [
         "name": "display_restart",
         "description": "Перезапустить дисплей (pygame окно).",
         "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {
+        "name": "display_set_background",
+        "description": "Сменить фон дисплея. path — имя файла внутри workspace/backgrounds/ (не абсолютный путь). Файл нужно сначала туда положить (web_download или run_code с matplotlib/PIL). Проверяет формат и разрешение, сохраняется навсегда (переживает рестарт).",
+        "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}},
     {"type": "function", "function": {
         "name": "agent_update",
         "description": "Обновить агента из git-репозитория (git pull + pip install) и перезапуститься. Использовать ТОЛЬКО когда пользователь явно просит обновить агента/бота/себя — НЕ систему.",

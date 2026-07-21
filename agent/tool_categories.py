@@ -66,8 +66,8 @@ CATEGORIES: dict[str, list[str]] = {
         "server_shell", "spotrent_status", "spotrent_start", "spotrent_stop",
     ],
     "agent_self": [
-        "agent_update", "agent_restart", "display_restart", "os_update",
-        "propose_code_change",
+        "agent_update", "agent_restart", "display_restart", "display_set_background",
+        "os_update", "propose_code_change",
     ],
     "diagnostics": [
         "iterations_recent", "logs_archive", "rollback_last", "session_history",

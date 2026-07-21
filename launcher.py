@@ -17,7 +17,8 @@ codes. Two additions:
     the same gate rubedo4's git-fetch-compare always assumed.
 
 ENABLE_DISPLAY keeps the same optional slot rubedo4 had for
-display/window.py — that module itself isn't ported in this pass.
+display/window.py, now ported (§19, stage 8) with the session-state
+and background adaptations described there.
 """
 from __future__ import annotations
 

@@ -32,6 +32,7 @@ import logging
 
 from config import OWNER_USER_ID
 from bus.client import BusClient
+from bus.server import BusServer
 from transport.telethon_transport import TelethonTransport
 
 log = logging.getLogger("rubedo.interface.telegram")
@@ -91,7 +92,13 @@ async def main() -> None:
     init_db()
 
     transport = TelethonTransport()
+    # This process hosts the bus relay — display/window.py runs as its
+    # own OS process (launcher.py) and connects to it as a plain
+    # client, same as any other subscriber would.
+    bus_server = BusServer()
+    await bus_server.start()
     bus = BusClient()
+    await bus.connect()
 
     # Crash recovery (§2 phase 2) — before anything else touches a
     # session. Whatever chat-origin session the last crash orphaned
