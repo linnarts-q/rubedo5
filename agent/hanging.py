@@ -31,7 +31,10 @@ import logging
 from datetime import datetime, timezone
 
 from config import APPROVAL_TTL_HOURS
-from memory.db import hanging_create, hanging_list_pending, hanging_resolve
+from memory.db import (
+    hanging_create, hanging_list_pending, hanging_resolve,
+    hanging_get_pending_for_session,
+)
 
 log = logging.getLogger("rubedo.agent.hanging")
 
@@ -62,10 +65,10 @@ def _fail_linked_session(row: dict, reason: str) -> None:
         log.debug(f"orphaned-session fail skipped: {e}")
 
 
-def _sweep_and_get(kind: str) -> dict | None:
+def _sweep(kind: str) -> list[dict]:
     """Expire every stale pending row of this kind (failing whatever
-    task session each was blocking), then return the most recent
-    still-pending one, if any."""
+    task session each was blocking), return the survivors, newest
+    first."""
     rows = hanging_list_pending(kind)  # newest first
     survivors = []
     for row in rows:
@@ -75,7 +78,22 @@ def _sweep_and_get(kind: str) -> dict | None:
             _fail_linked_session(row, "просрочено (TTL), ответа не дождалась")
         else:
             survivors.append(row)
+    return survivors
+
+
+def _sweep_and_get(kind: str) -> dict | None:
+    """Expire every stale pending row of this kind, then return the
+    most recent still-pending one, if any."""
+    survivors = _sweep(kind)
     return survivors[0] if survivors else None
+
+
+def list_pending(kind: str) -> list[dict]:
+    """All still-pending items of this kind, oldest first, after
+    sweeping anything past TTL — agent/routing.py (§2 phase 2 step 3)
+    needs to see every pending item at once, not just the most recent,
+    to route correctly when more than one is genuinely waiting."""
+    return list(reversed(_sweep(kind)))
 
 
 def create(kind: str, payload: dict, task_session_id: int | None = None) -> int:
@@ -96,6 +114,32 @@ def pending(kind: str) -> dict | None:
         hanging_resolve(row["id"], "expired")
         return None
     payload["_hanging_id"] = row["id"]
+    return payload
+
+
+def pending_for_session(session_id: int) -> dict | None:
+    """Kind-agnostic counterpart to pending(kind) — a 'waiting_user'
+    task session (agent/scheduler.py's status vocabulary) always has
+    exactly one pending hanging item, but the caller (agent/routing.py,
+    §2 phase 2 step 3) doesn't yet know whether it's an "ask_user"
+    question or an "approval" confirmation; this tells it, via
+    "_kind", alongside the usual "_hanging_id". Same TTL sweep as
+    pending(kind) — a session's answer window can go stale here too."""
+    row = hanging_get_pending_for_session(session_id)
+    if not row:
+        return None
+    if _is_stale(row):
+        log.info(f"Hanging question #{row['id']} ({row['kind']}) expired (TTL), clearing")
+        hanging_resolve(row["id"], "expired")
+        _fail_linked_session(row, "просрочено (TTL), ответа не дождалась")
+        return None
+    try:
+        payload = json.loads(row["payload"])
+    except Exception:
+        hanging_resolve(row["id"], "expired")
+        return None
+    payload["_hanging_id"] = row["id"]
+    payload["_kind"] = row["kind"]
     return payload
 
 

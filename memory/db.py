@@ -328,6 +328,13 @@ def init_db():
             );
             CREATE INDEX IF NOT EXISTS hanging_questions_kind_status_idx
                 ON hanging_questions (kind, status);
+            CREATE INDEX IF NOT EXISTS hanging_questions_session_status_idx
+                ON hanging_questions (task_session_id, status);
+            CREATE TABLE IF NOT EXISTS message_bindings (
+                message_id BIGINT PRIMARY KEY,
+                session_id INTEGER NOT NULL REFERENCES task_sessions(id) ON DELETE CASCADE,
+                sent_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS day_phase_state (
                 id INTEGER PRIMARY KEY,
                 phase TEXT NOT NULL DEFAULT 'night',
@@ -344,6 +351,31 @@ def init_db():
             CREATE INDEX IF NOT EXISTS notification_bundle_pending_idx
                 ON notification_bundle (delivered_at);
         """)
+
+
+# ─ Message bindings (§2 phase 2 step 3 — reply-to routing contract) ───
+# message_id -> task_session_id, written by the outgoing transport layer
+# whenever it sends a message on behalf of a task session (not built
+# yet in this repo — port from rubedo4's aiogram layer, area 1.5 of the
+# rubedo-map). Once it exists, an incoming reply's reply_to_message_id
+# resolves here for a deterministic, no-LLM session bind — everything
+# downstream (agent/routing.py) already checks this table first.
+
+def message_binding_create(message_id: int, session_id: int) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO message_bindings (message_id, session_id, sent_at) VALUES (%s,%s,%s) "
+            "ON CONFLICT (message_id) DO NOTHING",
+            (message_id, session_id, _now()),
+        )
+
+
+def message_binding_get(message_id: int) -> int | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT session_id FROM message_bindings WHERE message_id=%s", (message_id,)
+        ).fetchone()
+    return row["session_id"] if row else None
 
 
 # ─ Messages ────────────────────────────────────────────
@@ -1204,6 +1236,21 @@ def hanging_list_pending(kind: str) -> list[dict]:
             (kind,),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def hanging_get_pending_for_session(session_id: int) -> dict | None:
+    """The single pending hanging item (any kind — "ask_user" or
+    "approval") blocking this task session, if any. A session in
+    'waiting_user' always has exactly one — this is how agent/routing.py
+    (§2 phase 2 step 3) turns "which sessions are waiting, and on what"
+    into something it can route a reply to, without caring which kind."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM hanging_questions WHERE task_session_id=%s AND status='pending' "
+            "ORDER BY id DESC LIMIT 1",
+            (session_id,),
+        ).fetchone()
+    return dict(row) if row else None
 
 
 def hanging_resolve(hq_id: int, status: str) -> None:

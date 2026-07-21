@@ -1161,7 +1161,13 @@ TOOLS_SCHEMA: list[dict] = [
         "parameters": {"type": "object", "properties": {"update": {"type": "string"}}, "required": ["update"]}}},
     {"type": "function", "function": {
         "name": "ask_user",
-        "description": "Задать хозяину уточняющий вопрос посреди выполнения задачи и дождаться ответа, не теряя контекст",
+        "description": (
+            "Задать хозяину уточняющий вопрос посреди выполнения задачи и дождаться "
+            "ответа, не теряя контекст. Начни вопрос с короткой контекст-метки в 2-3 "
+            "слова про эту задачу (например «По бэкапам:», «Про билеты в Киев:») — "
+            "если у Лин сейчас несколько задач ждут ответа одновременно, это помогает "
+            "ей понять, о чём вопрос, даже не глядя на список сессий."
+        ),
         "parameters": {"type": "object", "properties": {"question": {"type": "string"}}, "required": ["question"]}}},
     {"type": "function", "function": {
         "name": "session_history",

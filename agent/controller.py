@@ -17,7 +17,7 @@ from agent.executor import run as executor_run
 from agent.audit import AuditLogger, check_normal_threshold, NORMAL_DIR
 from agent.prompts import build_gpt_system, build_analytics_system
 from agent.tools import TOOLS_SCHEMA, TOOLS_MAP, set_context
-from agent import approval, stopword, outcomes, sessions, questions, anchors, scheduler, resources
+from agent import approval, stopword, outcomes, sessions, anchors, scheduler, resources, routing, hanging
 from agent.reflect import reflect_on_failure
 from agent.verify import find_unacknowledged_failures
 from agent.tool_categories import get_tools_for_categories
@@ -163,7 +163,15 @@ async def handle_message(
     send_file_fn=None,
     send_photo_fn=None,
     skip_save_user: bool = False,
+    reply_to_message_id: int | None = None,
 ) -> None:
+    """`reply_to_message_id` (§2 phase 2 step 3) — the Telegram message
+    id this text replies to, if any. None until the interface layer
+    (not yet ported — rubedo-map area 1.5) actually passes one through;
+    agent.routing.resolve() degrades to its other rules when it's None,
+    so this parameter existing now with nothing populating it yet is
+    exactly the point — the routing logic doesn't change shape when
+    the port lands, only this one value stops being always-None."""
     session_id = "lin"
     _first_after_restart = session_id not in _session_started
     _session_started.add(session_id)
@@ -207,16 +215,29 @@ async def handle_message(
     await bus_client.publish(AgentStarted(session_id=session_id))
     await bus_client.publish(AgentThinking(session_id=session_id))
 
-    # Pending tool approval (techspec §1/§15) — a yellow/red-zone tool
-    # call from a previous turn is waiting on a yes/no. Recognizable
-    # confirmations resolve it here, before routing even runs; anything
-    # else falls through to the normal flow and leaves it pending.
-    _pending = approval.pending()
-    if _pending:
+    # Message routing for 'waiting_user' sessions (§2 phase 2 step 3,
+    # agent/routing.py) — one shared resolution instead of separately
+    # checking approval.pending() and questions.pending(): under real
+    # concurrency two sessions can each be genuinely waiting_user at
+    # once (one on a yellow-zone approval, one on an ask_user
+    # question), so "which one is this message answering" has to be
+    # decided once, not guessed twice independently. Resolved by
+    # hanging_id directly rather than approval.clear()/questions.clear()
+    # — those track their own single most-recent pending id, which this
+    # path never populates since it never calls their pending().
+    _target = await routing.resolve(text, reply_to_message_id, send_fn)
+    if _target is not None and _target.get("handled"):
+        if not skip_save_user:
+            save_message(session_id, "user", text)
+        await bus_client.publish(AgentReplied(session_id=session_id))
+        return
+
+    if _target is not None and _target["kind"] == "approval":
+        _pending = _target["payload"]
         _tsid = _pending.get("task_session_id")
         confirmed = approval.is_confirmation(text)
         if confirmed is True:
-            approval.clear()
+            hanging.resolve(_target["hanging_id"], "answered")
             if not skip_save_user:
                 save_message(session_id, "user", text)
             sessions.resume(_tsid)
@@ -231,7 +252,7 @@ async def handle_message(
             await bus_client.publish(AgentReplied(session_id=session_id))
             return
         if confirmed is False:
-            approval.clear()
+            hanging.resolve(_target["hanging_id"], "answered")
             if not skip_save_user:
                 save_message(session_id, "user", text)
             sessions.resume(_tsid)
@@ -250,13 +271,13 @@ async def handle_message(
     # answer. Resuming means continuing the SAME executor run with the
     # owner's answer appended, not starting a fresh turn from scratch —
     # that's the whole point of carrying the in-flight history through
-    # agent/questions.py rather than just re-asking from zero.
-    _pending_q = questions.pending()
-    if _pending_q:
-        questions.clear()
+    # rather than just re-asking from zero.
+    if _target is not None and _target["kind"] == "ask_user":
+        _pending_q = _target["payload"]
+        hanging.resolve(_target["hanging_id"], "answered")
         if not skip_save_user:
             save_message(session_id, "user", text)
-        _tsid_q = _pending_q["session_id"]
+        _tsid_q = _target["session_id"]
         sessions.resume(_tsid_q)
         sessions.log_decision(_tsid_q, "answer", text)
         resumed_history = _pending_q["history"] + [{"role": "user", "content": text}]
