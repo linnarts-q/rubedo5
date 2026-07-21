@@ -21,11 +21,28 @@ if MAX_CONCURRENT_SESSIONS is ever tuned down for testing or up after
 the spec's own week-of-stability gate.
 
 Resource tags are coarse and deterministic (agent/resources.py) — no
-file locks on the fly. Lin's task always wins a tag conflict (the
-queue session pauses); a new queue task blocked by conflict or a full
-slot is created directly as 'waiting_dependency' rather than 'active',
-and picked back up by resume_waiting() on a later tick — same
-tick-driven philosophy as the rest of the day-engine, not event-driven.
+file locks on the fly. Lin's task always wins a tag conflict; a new
+queue task blocked by conflict or a full slot is created directly as
+'waiting_dependency' rather than 'active', and picked back up by
+resume_waiting()/resume_displaced() on a later tick — same tick-driven
+philosophy as the rest of the day-engine, not event-driven.
+
+Restored §2 status vocabulary — three distinct blocked states, not one
+overloaded 'paused', each with its own waker:
+  - paused             — general scheduler policy, not tied to a
+    resource (chat-lane displacement, stop-phrase, pure slot-count
+    exhaustion). Wakes only via the scheduler.
+  - waiting_dependency  — blocked specifically by a resource-tag
+    conflict or another session (agent.sessions.block_dependency() if
+    it was already active, or created directly at this status if it
+    never got to run at all). Wakes via resume_waiting()/
+    resume_displaced() once the resource frees.
+  - waiting_user        — blocked on Lin answering a question or an
+    approval (agent/executor.py's ask_user/approval halts,
+    agent.sessions.wait_user()). Never touched by this module at all —
+    only agent/controller.py's message routing wakes it — and doesn't
+    count toward MAX_CONCURRENT_SESSIONS (list_active() only sees
+    'active' rows).
 """
 from __future__ import annotations
 
@@ -69,10 +86,10 @@ def start_session(title: str, origin: str = "chat", tags: list[str] | None = Non
         for s in queue_actives:
             if tag_set & _tags_of(s):
                 log.info(
-                    f"Pausing queue session #{s['id']} ({s['title']!r}) — "
+                    f"Blocking queue session #{s['id']} ({s['title']!r}) on dependency — "
                     f"resource conflict with Lin's task {title!r}"
                 )
-                sessions.pause(s["id"], reason=f"вытеснена задачей от Лин: {title}")
+                sessions.block_dependency(s["id"], reason=f"конфликт ресурсов с задачей от Лин: {title}")
                 remaining_queue.remove(s)
         # Slot-count fallback ("Нет свободного слота → автономная в
         # paused"). With the real MAX_CONCURRENT_SESSIONS=2 and exactly
@@ -100,15 +117,24 @@ def start_session(title: str, origin: str = "chat", tags: list[str] | None = Non
 
 
 def resume_waiting() -> list[dict]:
-    """Tick-driven resumption of queue sessions created as
-    'waiting_dependency'. Re-runs exactly the checks start_session()
-    itself used, oldest-blocked-first, so this can never activate a
-    session start_session() would have blocked — call this at the top
-    of agent/queue_runner.py's run_queue_tick(), before it looks for a
+    """Tick-driven resumption of queue sessions sitting in
+    'waiting_dependency' with no in-flight history to preserve — either
+    never ran at all (blocked at claim time), or does have a stash but
+    that stash is resume_displaced()'s job, not this one's (skipped
+    here so the two never race to activate the same session). Re-runs
+    exactly the checks start_session() itself used, oldest-blocked-
+    first, so this can never activate a session start_session() would
+    have blocked — call this at the top of agent/queue_runner.py's
+    run_queue_tick(), after resume_displaced(), before it looks for a
     new task to pick up."""
+    from agent import hanging
+
+    stash = hanging.pending("session_displaced")
+    stashed_sid = stash.get("task_session_id") if stash else None
+
     waiting = [
         s for s in sessions.list_sessions(status="waiting_dependency", limit=50)
-        if s.get("origin") == "queue"
+        if s.get("origin") == "queue" and s["id"] != stashed_sid
     ]
     waiting.sort(key=lambda s: s["id"])
 
@@ -147,7 +173,7 @@ def resume_displaced() -> tuple[dict, list, list, int] | None:
     hq_id = payload.pop("_hanging_id")
     sid = payload.get("task_session_id")
     s = sessions.get(sid) if sid is not None else None
-    if not s or s["status"] != "paused":
+    if not s or s["status"] not in ("paused", "waiting_dependency"):
         # Resolved some other way already (failed/cancelled) — stash is stale.
         hanging.resolve(hq_id, "stale")
         return None

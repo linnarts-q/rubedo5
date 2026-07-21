@@ -80,13 +80,14 @@ async def _run_inner(
     `ask_user` pause can be resumed later with the same tool set.
 
     `resumable_on_pause` (§2 phase 2) — set only by agent/queue_runner.py.
-    A queue session can be paused by someone else entirely mid-run (a
-    chat task displacing it via agent/scheduler.py) while this loop is
-    still live; when that happens, this run stashes its in-flight
-    history via agent/hanging.py (kind "session_displaced") instead of
-    just abandoning it, so a later tick can resume the exact same
-    reasoning rather than starting the task over. Chat-lane calls leave
-    this False: a displaced chat session was Lin starting a new
+    A queue session can be displaced by someone else entirely mid-run —
+    paused outright or blocked on a resource-tag conflict, agent/
+    scheduler.py — while this loop is still live; when that happens,
+    this run stashes its in-flight history via agent/hanging.py (kind
+    "session_displaced") instead of just abandoning it, so a later tick
+    can resume the exact same reasoning rather than starting the task
+    over. Chat-lane calls leave this False: a displaced chat session was
+    Lin starting a new
     conversation, not something to auto-resume later.
     """
     history = list(messages)
@@ -97,19 +98,23 @@ async def _run_inner(
 
     for _ in range(max_iterations):
         # §2 phase 2: with two sessions genuinely concurrent, this run's
-        # own session can be paused by someone else entirely (agent/
-        # scheduler.py displacing an active queue session for a chat
-        # task) while this loop is still executing — pause() only
-        # updates the DB, it can't reach into a live coroutine. Checked
-        # once per round-trip (not more often — coarse is fine here) so
-        # a displaced run notices and stops instead of finishing and
-        # calling sessions.complete()/fail(), which would silently
-        # overwrite the pause. Bounded, not instant: at most one more
-        # full round of tool calls can land on a paused session.
+        # own session can be displaced by someone else entirely (agent/
+        # scheduler.py pausing it outright, or blocking it on a
+        # resource-tag conflict — 'paused' or 'waiting_dependency', never
+        # 'waiting_user': that one is this same loop's own ask_user/
+        # approval halt, which already returns in the same iteration, no
+        # need to notice it a turn later) while this loop is still
+        # executing — the DB update alone can't reach into a live
+        # coroutine. Checked once per round-trip (not more often —
+        # coarse is fine here) so a displaced run notices and stops
+        # instead of finishing and calling sessions.complete()/fail(),
+        # which would silently overwrite the displacement. Bounded, not
+        # instant: at most one more full round of tool calls can land
+        # before this is noticed.
         if task_session_id is not None:
             _live = sessions.get(task_session_id)
-            if _live and _live["status"] == "paused":
-                log.info(f"Session #{task_session_id} paused externally — halting mid-run")
+            if _live and _live["status"] in ("paused", "waiting_dependency"):
+                log.info(f"Session #{task_session_id} displaced externally ({_live['status']}) — halting mid-run")
                 if resumable_on_pause:
                     hanging.create(
                         "session_displaced",
@@ -200,7 +205,7 @@ async def _run_inner(
                 await bus_client.publish(ToolCalled(name=name, args_preview=str(args)[:120]))
                 if audit:
                     audit.tool_called(name=name, args=args)
-                sessions.pause(task_session_id, reason=question)
+                sessions.wait_user(task_session_id, reason=question)
                 sessions.log_decision(task_session_id, "ask_user", question)
                 questions.ask(
                     task_session_id, question, history,
@@ -224,7 +229,7 @@ async def _run_inner(
                 )
                 if audit:
                     audit.final_reply(reply)
-                sessions.pause(task_session_id, reason=preview)
+                sessions.wait_user(task_session_id, reason=preview)
                 sessions.log_decision(task_session_id, "approval_pending", preview)
                 await bus_client.publish(WorkCompleted(session_id=session_id))
                 return reply, history

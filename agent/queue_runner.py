@@ -16,10 +16,12 @@ is genuinely still live (two sessions truly concurrent), so pausing it
 alone isn't enough to stop it; see agent/executor.py's own
 `resumable_on_pause` docstring for how a live run notices and halts.
 
-A queue task claimed but blocked before it can run (tag conflict) sits
-as its session's 'waiting_dependency'; one displaced mid-run sits
-'paused' with its history stashed (agent/hanging.py, kind
-"session_displaced"). rubedo_queue.session_id links the claim to
+A queue task claimed but blocked before it can run (tag conflict at
+claim time) sits as its session's 'waiting_dependency' with nothing to
+preserve; one displaced mid-run sits 'paused' (slot-count) or
+'waiting_dependency' (tag conflict — same status a never-ran session
+gets, but this one has a history stash to go with it, agent/hanging.py
+kind "session_displaced"). rubedo_queue.session_id links the claim to
 either, so a later tick's resume_waiting()/resume_displaced() can find
 and finish it without creating a second claim for the same task.
 
@@ -82,11 +84,11 @@ async def _execute(
     elif final["status"] == "done":
         queue_mark_done(task["id"], result=reply[:300])
         notify.notify_or_bundle("low", f"Сделала из очереди: {task['title']}", source="queue")
-    # else: status == "paused" — displaced mid-run by Lin's task again
-    # (agent/executor.py noticed and re-stashed) — leave rubedo_queue
-    # 'running', claim intact; nothing to report yet, a later tick
-    # picks it back up. Same for a not-yet-resolved "waiting_dependency"
-    # that never got this far.
+    # else: status is "paused" or "waiting_dependency" — displaced
+    # mid-run by Lin's task again (agent/executor.py noticed and
+    # re-stashed) — leave rubedo_queue 'running', claim intact; nothing
+    # to report yet, a later tick picks it back up. Same for a
+    # not-yet-resolved "waiting_dependency" that never got this far.
 
 
 async def run_queue_tick() -> None:

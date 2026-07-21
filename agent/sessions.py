@@ -147,20 +147,59 @@ def list_active() -> list[dict]:
 
 
 def pause(session_id: int | None, reason: str = "") -> None:
+    """Frozen by scheduler policy that isn't about a specific resource —
+    displacement within a lane (a new chat task bumping the old one),
+    a stop-phrase freeze, or losing out purely on slot count (agent/
+    scheduler.py). Wakes only via the scheduler (or, for a session that
+    was genuinely still executing when this happened, agent/executor.py's
+    own mid-run check + agent/hanging.py stash — see resume()).
+    Distinct from wait_user() (blocked on Lin, not the scheduler) and
+    block_dependency() (blocked on a resource tag specifically, §18)."""
     if session_id is None:
         return
     session_set_status(session_id, "paused")
     _log(session_id, "pause", reason or "приостановлена")
 
 
+def wait_user(session_id: int | None, reason: str = "") -> None:
+    """Blocked on Lin answering a question or confirming/declining a
+    tool call (agent/executor.py's ask_user/approval halts) — never
+    touched by the scheduler, and doesn't occupy a concurrency slot
+    (agent/scheduler.py counts only 'active' sessions). Only the
+    message this question/approval routes to (agent/controller.py)
+    wakes it, via resume()."""
+    if session_id is None:
+        return
+    session_set_status(session_id, "waiting_user")
+    _log(session_id, "wait_user", reason or "ждёт ответа Лин")
+
+
+def block_dependency(session_id: int | None, reason: str = "") -> None:
+    """A session that was already active gets blocked specifically by a
+    resource-tag conflict (§18, agent/scheduler.py) — distinct from
+    pause(): this one wakes when the resource frees (resume_waiting()/
+    resume_displaced()), not via general scheduler policy. Same target
+    status ('waiting_dependency') a queue session that never got to run
+    at all is created with directly (agent/sessions.create); which of
+    the two applies is about history, not meaning."""
+    if session_id is None:
+        return
+    session_set_status(session_id, "waiting_dependency")
+    _log(session_id, "block_dependency", reason or "заблокирована конфликтом ресурсов")
+
+
 def resume(session_id: int | None) -> dict | None:
-    """Resume a paused session. No-op (returns None) if there's no
-    session, or it's not actually paused — already-terminal or
-    already-active sessions have nothing to resume."""
+    """Resume a session blocked in any of the three non-terminal ways
+    (paused / waiting_user / waiting_dependency) back to active. No-op
+    (returns None) if there's no session, or it's already active or
+    terminal — nothing to resume. Which blocked status a given session
+    was in only matters for who's allowed to call this (the scheduler
+    for paused/waiting_dependency, agent/controller.py's routing for
+    waiting_user) — the transition itself is identical."""
     if session_id is None:
         return None
     s = session_get(session_id)
-    if not s or s["status"] != "paused":
+    if not s or s["status"] not in ("paused", "waiting_user", "waiting_dependency"):
         return None
     session_set_status(session_id, "active")
     _log(session_id, "resume", "возобновлена")
