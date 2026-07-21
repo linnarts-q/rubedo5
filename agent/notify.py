@@ -117,3 +117,36 @@ def notify_or_bundle(
     from memory.db import save_bundled_notification
     save_bundled_notification(severity, content, source)
     return False
+
+
+async def deliver(
+    severity: str, content: str, send_fn,
+    source: str = "", quiet_start: str | None = None, quiet_end: str | None = None,
+    task_session_id: int | None = None,
+) -> int | None:
+    """One call instead of hand-rolling "notify_or_bundle, then maybe
+    send_fn" at every call site (§2 phase 2, stage 7.5 — the transport
+    layer is what finally makes this matter: day/tick.py's own checks
+    already did this by hand, but agent/queue_runner.py's
+    notify_or_bundle calls never called anything afterward at all, so
+    autonomous-task notifications silently never reached the owner).
+
+    Returns the outgoing message's id if it was actually sent, None if
+    it was bundled instead OR there's simply no transport to send
+    through yet (`send_fn=None` — some callers run outside a live
+    process, e.g. tests calling day/wrapup.py directly). `task_session_id`,
+    when given, gets the id written to memory.db.message_bindings — so
+    a later reply to this exact message routes back to this session
+    deterministically (agent/routing.py already reads that table;
+    nothing wrote to it before this)."""
+    if not should_deliver(severity, quiet_start, quiet_end):
+        from memory.db import save_bundled_notification
+        save_bundled_notification(severity, content, source)
+        return None
+    if send_fn is None:
+        return None
+    message_id = await send_fn(content)
+    if task_session_id is not None and message_id is not None:
+        from memory.db import message_binding_create
+        message_binding_create(message_id, task_session_id)
+    return message_id

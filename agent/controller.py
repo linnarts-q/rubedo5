@@ -74,6 +74,20 @@ def _intercept_expired(armed_meta_key: str, hours: float) -> bool:
     return (datetime.now() - armed).total_seconds() > hours * 3600
 
 
+async def _send(send_fn, text, task_session_id: int | None = None):
+    """Send, then bind if this reply belongs to a task session (§2
+    phase 2, stage 7.5) — the outgoing message's id (when the
+    transport has one) goes to memory.db.message_bindings so a later
+    reply-to-this-message routes back here deterministically
+    (agent/routing.py). Every session-tied `send_fn` call in this file
+    should go through this instead of calling send_fn directly."""
+    message_id = await send_fn(text)
+    if task_session_id is not None and message_id is not None:
+        from memory.db import message_binding_create
+        message_binding_create(message_id, task_session_id)
+    return message_id
+
+
 def _clean_reply(text: str) -> str:
     text = _SYSPFX_RE.sub("", text)
     text = _TS_RE.sub("", text)
@@ -247,7 +261,7 @@ async def handle_message(
                 sessions.fail(_tsid, result)
             else:
                 sessions.complete(_tsid, result=str(result)[:300])
-            await send_fn(reply)
+            await _send(send_fn, reply, _tsid)
             save_message(session_id, "assistant", reply)
             await bus_client.publish(AgentReplied(session_id=session_id))
             return
@@ -258,7 +272,7 @@ async def handle_message(
             sessions.resume(_tsid)
             sessions.cancel(_tsid, reason="владелец отменил подтверждение")
             reply = "Отменила, не выполняю."
-            await send_fn(reply)
+            await _send(send_fn, reply, _tsid)
             save_message(session_id, "assistant", reply)
             await bus_client.publish(AgentReplied(session_id=session_id))
             return
@@ -307,7 +321,7 @@ async def handle_message(
                 except Exception as e:
                     reply = "Не получилось продолжить после сбоя, попробуй ещё раз."
                     sessions.fail(_csid, f"{type(e).__name__}: {e}")
-                await send_fn(reply)
+                await _send(send_fn, reply, _csid)
                 save_message(session_id, "assistant", reply)
             await bus_client.publish(AgentReplied(session_id=session_id))
             return
@@ -358,7 +372,7 @@ async def handle_message(
             reply = "Что-то пошло не так, попробуй ещё раз."
             sessions.fail(_tsid_q, f"{type(e).__name__}: {e}")
             log.exception(f"Session-resume error [{type(e).__name__}]: {e}")
-        await send_fn(reply)
+        await _send(send_fn, reply, _tsid_q)
         save_message(session_id, "assistant", reply)
         await bus_client.publish(AgentReplied(session_id=session_id))
         return
@@ -734,7 +748,7 @@ async def handle_message(
                     + "; ".join(_unacked[:2]) + ". Проверь на всякий случай.)"
                 )
 
-    await send_fn(reply)
+    await _send(send_fn, reply, task_session_id)
     save_message(session_id, "assistant", reply)
 
     log_path = audit.close()

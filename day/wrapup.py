@@ -120,11 +120,9 @@ async def run_wrapup(send_fn=None) -> str:
     from agent import notify
 
     text = await generate_wrapup_text()
-    delivered = notify.notify_or_bundle(
-        "normal", text, source="wrapup", quiet_start="00:00", quiet_end="23:59",
+    await notify.deliver(
+        "normal", text, send_fn, source="wrapup", quiet_start="00:00", quiet_end="23:59",
     )
-    if delivered and send_fn:
-        await send_fn(text)
     set_wrapup_done(True)
 
     if not get_unverified_today():

@@ -110,11 +110,9 @@ async def run_briefing(send_fn=None) -> str:
     from day.state import set_briefing_done
 
     text = await generate_briefing_text()
-    delivered = notify.notify_or_bundle(
-        "normal", text, source="briefing", quiet_start="00:00", quiet_end="23:59",
+    await notify.deliver(
+        "normal", text, send_fn, source="briefing", quiet_start="00:00", quiet_end="23:59",
     )
-    if delivered and send_fn:
-        await send_fn(text)
     set_briefing_done(True)
     return text
 

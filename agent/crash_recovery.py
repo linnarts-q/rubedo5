@@ -149,9 +149,14 @@ def _handle_chat_orphan(s: dict) -> tuple[dict, str]:
 
 def recover_after_crash() -> str | None:
     """Call once at process startup, before anything else touches
-    sessions. Returns the one important-severity message to send Lin
-    (agent/notify.py), or None if there's nothing for her to decide —
-    only autonomous work was orphaned (silently requeued), or there was
+    sessions. Returns the one message to send Lin at "critical"
+    severity (agent/notify.py — the actual implemented tiers are
+    critical/normal/low, not the abstract spec's critical/important/
+    routine naming; "the whole agent just crashed and restarted" earns
+    the tier that breaks through night/day-off/quiet-mode same as a
+    real emergency would, deliberately not "normal"), or None if
+    there's nothing for her to decide — only autonomous work was
+    orphaned (silently requeued), or there was
     no crash at all."""
     if not detect_crash():
         agent_heartbeat()

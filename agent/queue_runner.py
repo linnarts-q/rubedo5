@@ -52,14 +52,19 @@ log = logging.getLogger("rubedo.agent.queue_runner")
 
 
 async def _execute(
-    task: dict, s: dict, messages: list, max_iterations: int = 15,
+    task: dict, s: dict, messages: list, send_fn, max_iterations: int = 15,
 ) -> None:
     """Run one claimed, active queue session to completion (or failure,
     or a fresh mid-run displacement), and report the outcome. Shared by
     the fresh-pickup path and both resumption paths — always full tool
     access (queue tasks never had a classifier-restricted set; the
     resource tags used for conflict detection are a separate concern,
-    agent/resources.py), just a different starting `messages`."""
+    agent/resources.py), just a different starting `messages`.
+
+    `send_fn` is the transport's plain (text) -> message_id | None
+    callable (transport/base.py) — threaded through from run_queue_tick
+    so notify.deliver() below can actually reach the owner instead of
+    only deciding "should this be sent" and stopping there."""
     try:
         reply, _ = await executor_run(
             messages=messages,
@@ -78,12 +83,12 @@ async def _execute(
         should_retry = queue_mark_failed(task["id"], final.get("error") or "")
         if not should_retry:
             verdict = await reflect_on_failure(sessions.journal(s["id"]), final.get("error") or "")
-            notify.notify_or_bundle(
-                "normal", f"Задача из очереди не получилась: {verdict['diagnosis']}", source="queue",
+            await notify.deliver(
+                "normal", f"Задача из очереди не получилась: {verdict['diagnosis']}", send_fn, source="queue",
             )
     elif final["status"] == "done":
         queue_mark_done(task["id"], result=reply[:300])
-        notify.notify_or_bundle("low", f"Сделала из очереди: {task['title']}", source="queue")
+        await notify.deliver("low", f"Сделала из очереди: {task['title']}", send_fn, source="queue")
     # else: status is "paused" or "waiting_dependency" — displaced
     # mid-run by Lin's task again (agent/executor.py noticed and
     # re-stashed) — leave rubedo_queue 'running', claim intact; nothing
@@ -91,7 +96,7 @@ async def _execute(
     # not-yet-resolved "waiting_dependency" that never got this far.
 
 
-async def run_queue_tick() -> None:
+async def run_queue_tick(send_fn=None) -> None:
     if stopword.is_frozen() or load_meta("queue_paused") == "1":
         return
 
@@ -106,7 +111,7 @@ async def run_queue_tick() -> None:
             sessions.log_decision(
                 resumed_sess["id"], "initiative", f"продолжает из очереди (после вытеснения): {task['title']}",
             )
-            await _execute(task, resumed_sess, hist, max_iter)
+            await _execute(task, resumed_sess, hist, send_fn, max_iter)
         return  # at most one autonomous session — handled either way
 
     # (2) a session that never got to run at all (tag conflict at claim
@@ -117,7 +122,9 @@ async def run_queue_tick() -> None:
         task = queue_get_running()
         if task and task.get("session_id") == resumed["id"]:
             sessions.log_decision(resumed["id"], "initiative", f"продолжает из очереди: {task['title']}")
-            await _execute(task, resumed, [{"role": "user", "content": task["description"] or task["title"]}])
+            await _execute(
+                task, resumed, [{"role": "user", "content": task["description"] or task["title"]}], send_fn,
+            )
         return
 
     claimed = queue_get_running()
@@ -131,9 +138,9 @@ async def run_queue_tick() -> None:
             # rubedo_queue row would sit at 'running' forever.
             should_retry = queue_mark_failed(claimed["id"], _sess.get("error") or "истёк срок ожидания")
             if not should_retry:
-                notify.notify_or_bundle(
+                await notify.deliver(
                     "normal", f"Задача из очереди не получилась (истёк срок ожидания): {claimed['title']}",
-                    source="queue",
+                    send_fn, source="queue",
                 )
         return  # already claimed: executing in another concurrent call, still waiting_dependency, or just reconciled
 
@@ -153,4 +160,4 @@ async def run_queue_tick() -> None:
         return  # waiting_dependency — claimed, a later tick will resume it
 
     sessions.log_decision(s["id"], "initiative", f"взяла из очереди: {task['title']}")
-    await _execute(task, s, [{"role": "user", "content": task["description"] or task["title"]}])
+    await _execute(task, s, [{"role": "user", "content": task["description"] or task["title"]}], send_fn)

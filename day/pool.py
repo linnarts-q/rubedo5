@@ -182,12 +182,15 @@ def _today_nudge_count(now: datetime) -> int:
     return int(row["n"]) if row else 0
 
 
-async def run_tick(tg_client, owner_id: int) -> None:
+async def run_tick(send_fn) -> None:
     """One tick: pick a due P1-P3 task, piggy-back any due P5s, and nudge.
 
     P4 and P5 are not the primary subject of between-tasks ticks anymore —
     they are surfaced at morning briefing via `get_morning_batch()`. P5
     additionally rides along when a P1-P3 primary fires here.
+
+    `send_fn` is the transport's plain (text) -> message_id | None
+    callable (transport/base.py) — no tg_client/owner_id here, §17.
     """
     from agent import notify
 
@@ -214,24 +217,22 @@ async def run_tick(tg_client, owner_id: int) -> None:
         log.warning(f"nudge gen failed for #{primary['id']}: {e}")
         text = f"Напоминаю про задачу: «{primary['title']}»."
 
-    deliver_now = notify.notify_or_bundle(
-        "low", text, source="pool",
-        quiet_start=POOL_QUIET_START, quiet_end=POOL_QUIET_END,
-    )
     mark_nudged(primary["id"])
     for t in piggyback:
         mark_nudged(t["id"])
 
-    if not deliver_now:
-        log.info(f"pool nudge for #{primary['id']} bundled (policy restricted), not sent now")
-        return
-
     try:
-        await tg_client.send_message(owner_id, text)
-        log.info(
-            f"pool nudge: primary #{primary['id']}"
-            + (f", piggyback {[t['id'] for t in piggyback]}" if piggyback else "")
+        message_id = await notify.deliver(
+            "low", text, send_fn, source="pool",
+            quiet_start=POOL_QUIET_START, quiet_end=POOL_QUIET_END,
         )
+        if message_id is None:
+            log.info(f"pool nudge for #{primary['id']} bundled (policy restricted), not sent now")
+        else:
+            log.info(
+                f"pool nudge: primary #{primary['id']}"
+                + (f", piggyback {[t['id'] for t in piggyback]}" if piggyback else "")
+            )
     except Exception as e:
         log.error(f"pool nudge send failed for #{primary['id']}: {e}")
 
