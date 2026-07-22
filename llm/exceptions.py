@@ -1,0 +1,2 @@
+class AllKeysExhausted(Exception):
+    pass
