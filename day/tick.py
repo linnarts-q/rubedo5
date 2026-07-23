@@ -142,6 +142,43 @@ async def _check_wrapup(send_fn) -> None:
     await wrapup.run_wrapup(send_fn)
 
 
+async def _check_health_sweep(send_fn) -> None:
+    """workspace/health_sweep.py (§6, pulled forward to stage 9.3) is
+    her own editable file, not core — a broken edit must never take
+    the tick down with it. A plain cached import (not a per-tick
+    re-exec from disk) on purpose: her own per-metric alert cooldown
+    lives in that module's process-lifetime state, and reloading fresh
+    every 60 seconds would silently reset it every tick. A successful
+    import stays cached for the rest of this process's life (edits
+    need a restart to take effect, same as any other code change); a
+    failed import is retried on every following tick automatically
+    (Python doesn't cache a module that failed mid-exec) — so once she
+    fixes it, it picks back up on its own, no restart needed for that
+    direction. Any failure at all — import-time or from check() itself
+    — is reported back to her at "normal" severity so she can fix it
+    via the reflexive cycle, and the tick moves on regardless. A real
+    threshold breach is "critical" (§7) — it has to break through
+    night/day-off/quiet-mode (С16), the whole reason this got pulled
+    forward ahead of the rest of §6."""
+    import importlib
+    from agent import notify
+
+    try:
+        health_sweep = importlib.import_module("workspace.health_sweep")
+        alerts = await health_sweep.check()
+    except Exception as e:
+        log.error(f"health_sweep failed (her own edit broke it?): {e}")
+        await notify.deliver(
+            "normal", f"health_sweep упал: {e}. Почини через рефлексию.", send_fn,
+            source="health_sweep",
+        )
+        return
+
+    if alerts:
+        text = "Показатели системы вышли за пределы: " + ", ".join(alerts)
+        await notify.deliver("critical", text, send_fn, source="health_sweep")
+
+
 async def run_day_tick(send_fn) -> None:
     """One tick. Every check is idempotent — safe to call repeatedly
     (e.g. once a minute) without double-firing anything. `send_fn` is
@@ -153,5 +190,6 @@ async def run_day_tick(send_fn) -> None:
     await _check_briefing(send_fn)
     await _check_wrapup(send_fn)
     await _check_evening_negotiation(send_fn)
+    await _check_health_sweep(send_fn)
     await pool.run_tick(send_fn)
     await run_queue_tick(send_fn)
