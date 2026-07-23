@@ -111,26 +111,68 @@ def _mark_clean_shutdown() -> None:
         log.warning(f"shutdown_clean failed: {e}")
 
 
+def _terminate_all(procs: dict[str, subprocess.Popen]) -> None:
+    for proc in procs.values():
+        if proc.poll() is None:
+            proc.terminate()
+    for proc in procs.values():
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+def supervise_tick(
+    procs: dict[str, subprocess.Popen],
+    restarts: dict[str, int],
+    failed: set[str],
+    processes: list[dict] = PROCESSES,
+) -> bool:
+    """One supervisor pass: restart any process that died (unless it's
+    permanently failed or an intentional/update exit code), respecting
+    MAX_RESTARTS. Mutates procs/restarts/failed in place. Returns True
+    if an update is now pending (caller decides when to actually apply
+    it — see main()'s own pending_update handling, unchanged here).
+    Split out from main()'s loop so a test can drive exactly one tick
+    against a real child process without needing the infinite loop or
+    a live Telegram connection."""
+    pending_update = False
+    for p in processes:
+        name = p["name"]
+        if name in failed:
+            continue
+        if procs[name].poll() is None:
+            continue
+        code = procs[name].returncode
+        if code == RESTART_CODE:
+            log.info(f"[{name}] Intentional restart")
+            restarts[name] = 0
+        elif code == UPDATE_CODE:
+            log.info(f"[{name}] Update requested — will restart once no active Lin session")
+            pending_update = True
+            continue
+        else:
+            restarts[name] += 1
+            log.warning(f"[{name}] Exited code={code} restart={restarts[name]}/{MAX_RESTARTS}")
+        if restarts[name] >= MAX_RESTARTS:
+            log.error(f"[{name}] Max restarts reached, giving up")
+            failed.add(name)
+            continue
+        time.sleep(2)
+        procs[name] = _start(p)
+    return pending_update
+
+
 def main() -> None:
     procs: dict[str, subprocess.Popen] = {}
     restarts: dict[str, int] = {}
     failed: set[str] = set()  # permanently dead, won't be restarted
     pending_update = False
 
-    def _terminate_all() -> None:
-        for proc in procs.values():
-            if proc.poll() is None:
-                proc.terminate()
-        for proc in procs.values():
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-
     def _shutdown_and_exit(*_a) -> None:
         log.info("Shutting down...")
         _mark_clean_shutdown()
-        _terminate_all()
+        _terminate_all(procs)
         sys.exit(0)
 
     signal.signal(signal.SIGTERM, _shutdown_and_exit)
@@ -147,7 +189,7 @@ def main() -> None:
                 if _lin_has_active_session():
                     continue  # deferred (§8) — re-check next tick
                 log.info("No active Lin session — proceeding with deferred update")
-                _terminate_all()
+                _terminate_all(procs)
                 _do_update()
                 pending_update = False
                 for p2 in PROCESSES:
@@ -156,29 +198,8 @@ def main() -> None:
                     procs[p2["name"]] = _start(p2)
                 continue
 
-            for p in PROCESSES:
-                name = p["name"]
-                if name in failed:
-                    continue
-                if procs[name].poll() is None:
-                    continue
-                code = procs[name].returncode
-                if code == RESTART_CODE:
-                    log.info(f"[{name}] Intentional restart")
-                    restarts[name] = 0
-                elif code == UPDATE_CODE:
-                    log.info(f"[{name}] Update requested — will restart once no active Lin session")
-                    pending_update = True
-                    continue
-                else:
-                    restarts[name] += 1
-                    log.warning(f"[{name}] Exited code={code} restart={restarts[name]}/{MAX_RESTARTS}")
-                if restarts[name] >= MAX_RESTARTS:
-                    log.error(f"[{name}] Max restarts reached, giving up")
-                    failed.add(name)
-                    continue
-                time.sleep(2)
-                procs[name] = _start(p)
+            if supervise_tick(procs, restarts, failed, PROCESSES):
+                pending_update = True
     except KeyboardInterrupt:
         _shutdown_and_exit()
 
