@@ -12,7 +12,12 @@ events, experience, internal_notes, wishes, day_tasks,
 recurring_tasks, week_events, rubedo_tasks, insights, pool_tasks,
 rubedo_queue(+recurring), profiles -- plus only the most recent slice
 of raw `messages` (--messages-limit, default 20 rows ~ 10 exchanges),
-not the whole chat log.
+not the whole chat log. Every migrated user-role message gets tagged
+`[закрыто]` (stage 9.6) -- §11 layer 1's outcome-annotation only ever
+looks at TODAY's day_tasks, so it can never retroactively mark an old
+instruction among these as done/cancelled; left untagged, a weak model
+could read a months-old "сделай Х" as still standing the moment it
+lands in fresh context.
 
 Deliberately NOT migrated:
   - working_memory: dead table in rubedo5 -- no read/write function
@@ -113,13 +118,29 @@ def _fetch_all(sqlite_conn: sqlite3.Connection, table: str, cols: list[str]) -> 
 
 
 def _fetch_recent_messages(sqlite_conn: sqlite3.Connection, limit: int) -> list[dict]:
+    """Tags every migrated user-role message with [закрыто] -- critical
+    per §11 layer 1 (agent/outcomes.py): that mechanism only annotates
+    outcomes by matching TODAY's day_tasks and terminal-state queue
+    items, so it can never retroactively catch an old "сделай Х" among
+    these migrated rows. Left unannotated, a weak model could read one
+    as a still-standing order the moment it lands in fresh context --
+    the exact bug §11 exists to prevent, just via a different route
+    than the one it was built for. A permanent, generic tag (not one of
+    outcomes.py's specific done/failed/cancelled labels, since the true
+    outcome of a months-old instruction usually isn't known at
+    migration time) baked directly into the stored content, so no
+    runtime lookup is needed for these rows ever again."""
     cols = ["session_id", "role", "content", "created_at"]
     col_sql = ", ".join(["id"] + cols)
     rows = sqlite_conn.execute(
         f"SELECT {col_sql} FROM messages ORDER BY id DESC LIMIT ?", (limit,)
     ).fetchall()
     keys = ["id"] + cols
-    return [dict(zip(keys, r)) for r in reversed(rows)]
+    result = [dict(zip(keys, r)) for r in reversed(rows)]
+    for row in result:
+        if row["role"] == "user" and not row["content"].startswith("[закрыто]"):
+            row["content"] = f"[закрыто] {row['content']}"
+    return result
 
 
 def _insert_rows(pg_conn, table: str, cols: list[str], rows: list[dict]) -> int:
