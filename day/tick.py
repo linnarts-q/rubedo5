@@ -188,6 +188,26 @@ async def _check_health_sweep(send_fn) -> None:
         await notify.deliver("critical", text, send_fn, source="health_sweep")
 
 
+async def _check_reminders(send_fn) -> None:
+    """Reminders (stage 9.5 — ported from rubedo4's skills/reminder.py
+    + interface/telegram.py's own _reminder_loop, which fired them
+    directly rather than through any severity gate). "Обычные" per the
+    spec's own §7 wording (важные/important) maps to "normal" here —
+    see CLAUDE.md's mapping table, the actual implemented tier names
+    aren't the spec's literal words."""
+    from memory.db import get_due_reminders, mark_reminder_done, save_event
+    from agent import notify
+
+    for r in get_due_reminders():
+        await notify.deliver("normal", f"⏰ {r['text']}", send_fn, source="reminder")
+        mark_reminder_done(r["id"])
+        save_event(
+            session_id=r.get("session_id") or "lin",
+            content=f"Отправила напоминание: {r['text']}",
+            priority=2, category="proactive",
+        )
+
+
 async def _check_idle_agenda(send_fn) -> None:
     """Idle-agenda (§6, stage 9.4) — only when there's truly nothing
     else going on: no active sessions, an empty rubedo_queue, and the
@@ -217,6 +237,7 @@ async def run_day_tick(send_fn) -> None:
     await _check_wrapup(send_fn)
     await _check_evening_negotiation(send_fn)
     await _check_health_sweep(send_fn)
+    await _check_reminders(send_fn)
     await pool.run_tick(send_fn)
     await run_queue_tick(send_fn)
     await _check_idle_agenda(send_fn)

@@ -761,6 +761,12 @@ def delete_event(event_id: int) -> bool:
 # ─ Reminders ──────────────────────────────────────────────────────────────
 
 def save_reminder(session_id: str, text: str, remind_at: str) -> int:
+    # Normalize ISO "T" separator to the space format the rest of the
+    # queries use for string comparison (same convention queue_add()
+    # already applies to scheduled_at) — remind_at comes straight from
+    # whatever format the LLM's tool call happened to generate.
+    if remind_at:
+        remind_at = remind_at.replace("T", " ")
     with get_conn() as conn:
         row = conn.execute(
             "INSERT INTO reminders (session_id, text, remind_at, created_at) VALUES (%s, %s, %s, %s) RETURNING id",
@@ -773,6 +779,25 @@ def get_pending_reminders() -> list:
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT id, session_id, text, remind_at FROM reminders WHERE done=0 ORDER BY remind_at ASC"
+        ).fetchall()
+    return [{"id": r["id"], "session_id": r["session_id"], "text": r["text"], "remind_at": r["remind_at"]} for r in rows]
+
+
+def get_due_reminders() -> list:
+    """Pending reminders whose remind_at has already passed. remind_at
+    represents a LOCAL wall-clock time ("напомни в 10 утра" means local
+    10am, not UTC) — compared against config.now_local(), not _now()
+    (that one is deliberately UTC, for created_at/updated_at bookkeeping
+    columns, a different thing entirely). A plain string comparison,
+    which sorts correctly lexicographically since save_reminder()
+    normalizes to the same "%Y-%m-%d %H:%M:%S" format at write time."""
+    from config import now_local
+    now_str = now_local().strftime("%Y-%m-%d %H:%M:%S")
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT id, session_id, text, remind_at FROM reminders "
+            "WHERE done=0 AND remind_at <= %s ORDER BY remind_at ASC",
+            (now_str,),
         ).fetchall()
     return [{"id": r["id"], "session_id": r["session_id"], "text": r["text"], "remind_at": r["remind_at"]} for r in rows]
 

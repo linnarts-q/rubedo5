@@ -61,6 +61,11 @@ _RESET_STATEMENTS = [
     # reaches for in a later, unrelated test.
     "DELETE FROM wishes",
     "DELETE FROM meta WHERE key LIKE 'idle_agenda_%'",
+    # tests/test_reminders.py -- same pollution shape, a leftover
+    # reminder from an earlier test would surface in a later,
+    # unrelated get_due_reminders()/get_pending_reminders() call.
+    "DELETE FROM reminders",
+    "DELETE FROM meta WHERE key='display_alarm_active'",
 ]
 
 
