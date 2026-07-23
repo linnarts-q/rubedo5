@@ -58,7 +58,7 @@ CATEGORIES: dict[str, list[str]] = {
     ],
     "media": [
         "music_play", "music_pause", "music_resume", "music_stop",
-        "music_next", "music_louder", "music_quieter",
+        "music_next", "music_louder", "music_quieter", "speak",
     ],
     "system": [
         "system_info", "system_uptime", "system_volume", "system_env_set",

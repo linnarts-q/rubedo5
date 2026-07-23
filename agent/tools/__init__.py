@@ -51,6 +51,9 @@ from agent.tools.music import (  # noqa: E402  (re-export)
 from agent.tools.news import (  # noqa: E402  (re-export)
     news,
 )
+from agent.tools.tts import (  # noqa: E402  (re-export)
+    speak,
+)
 
 log = logging.getLogger("rubedo.tools")
 
@@ -1157,6 +1160,7 @@ TOOLS_MAP: dict[str, callable] = {
     "music_next": music_next,
     "music_louder": music_louder,
     "music_quieter": music_quieter,
+    "speak": speak,
     # pool.*
     "pool_add": add_pool_task,
     "pool_list": list_pool_tasks,
@@ -1527,6 +1531,12 @@ TOOLS_SCHEMA: list[dict] = [
         "name": "music_quieter",
         "description": "Сделать музыку тише",
         "parameters": {"type": "object", "properties": {}, "required": []}}},
+    {"type": "function", "function": {
+        "name": "speak",
+        "description": "Сказать текст вслух через колонку мини-ПК (TTS)",
+        "parameters": {"type": "object", "properties": {
+            "text": {"type": "string"},
+        }, "required": ["text"]}}},
     {"type": "function", "function": {
         "name": "note_list",
         "description": "Показать список заметок",
