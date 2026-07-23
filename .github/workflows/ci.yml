@@ -39,7 +39,12 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install -r requirements-dev.txt
+        # SETUPTOOLS_USE_DISTUTILS=stdlib: telethon's pyaes dependency
+        # hasn't been updated in years and its setup.py breaks against
+        # modern setuptools' own vendored distutils -- this tells
+        # setuptools to fall back to the stdlib copy instead, which
+        # pyaes's old-style build still works against.
+        run: SETUPTOOLS_USE_DISTUTILS=stdlib pip install -r requirements-dev.txt
 
       - name: pytest
         run: pytest

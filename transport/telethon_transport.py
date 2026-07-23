@@ -28,8 +28,6 @@ import logging
 import random
 import re
 
-from telethon import TelegramClient, events
-
 from config import TELEGRAM_API_ID, TELEGRAM_API_HASH, OWNER_USER_ID
 
 log = logging.getLogger("rubedo.transport.telethon")
@@ -77,6 +75,11 @@ def _split_reply(text: str) -> list[str]:
 
 class TelethonTransport:
     def __init__(self) -> None:
+        # Lazy import: telethon is a real, heavy dependency only needed
+        # to actually run a live connection, not to import this module
+        # (agent/tools that reference the transport type, or tests that
+        # import interface/telegram.py, shouldn't require it installed).
+        from telethon import TelegramClient
         self.client = TelegramClient("rubedo", TELEGRAM_API_ID, TELEGRAM_API_HASH)
 
     async def send(self, text: str) -> int | None:
@@ -107,6 +110,7 @@ class TelethonTransport:
         """`on_message(event)` is awaited for every incoming text
         message from the owner, normalized to
         `{"text": str, "reply_to_message_id": int | None}`."""
+        from telethon import events
 
         @self.client.on(events.NewMessage(incoming=True))
         async def _handler(event):

@@ -53,6 +53,28 @@ async def _tick_loop(transport: TelethonTransport) -> None:
         await asyncio.sleep(_TICK_INTERVAL_SEC)
 
 
+async def _on_bus_event(event) -> None:
+    """The one bus subscription this process needs so far: the
+    display's tap-to-dismiss (display/window.py, §19) has to reach
+    back to the phase automaton (§17), not just clear the screen —
+    same guard agent/controller.py's message-reply path already uses,
+    so a stray/late AlarmDismissed can't force a transition that
+    doesn't apply anymore (already morning for some other reason)."""
+    from bus.events import AlarmDismissed
+    if not isinstance(event, AlarmDismissed):
+        return
+    import day.phase as phase
+    from config import now_local
+    from memory.db import load_meta
+    if phase.current() != "night":
+        return
+    today = now_local().date().isoformat()
+    if load_meta(f"wake_alarm_fired_{today}") != "1":
+        return
+    phase.on_wake_confirmed()
+    log.info("Alarm dismissed on the physical display -> phase confirmed night -> morning")
+
+
 async def _heartbeat_loop() -> None:
     from memory.db import agent_heartbeat
 
@@ -98,6 +120,7 @@ async def main() -> None:
     bus_server = BusServer()
     await bus_server.start()
     bus = BusClient()
+    bus.subscribe(_on_bus_event)
     await bus.connect()
 
     # Crash recovery (§2 phase 2) — before anything else touches a

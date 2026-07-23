@@ -71,9 +71,17 @@ async def _check_wake_alarm(send_fn) -> None:
     level night-phase policy lets through at all (agent/notify.py).
     Critical is always deliverable (never bundled) but notify.deliver()
     still has to actually be called, or the alarm is computed and
-    marked fired without ever reaching the owner. Confirming wake-up
-    (night -> morning) happens separately, on the owner's next real
-    message (agent/controller.py), not here — this only sounds it."""
+    marked fired without ever reaching the owner.
+
+    Also arms the physical display's alarm screen (§19, stage 9.5's
+    bridge — display_alarm_active in meta, polled by display/window.py
+    every second, replacing the dead file-flag rubedo4 used). Confirming
+    wake-up (night -> morning) happens two ways from here: on the
+    owner's next real message (agent/controller.py, unchanged), or on
+    the physical screen's tap-to-dismiss, which publishes AlarmDismissed
+    on the bus for interface/telegram.py to turn into the same
+    phase.on_wake_confirmed() call (§17) — a bare screen with no return
+    path back to the phase machine would just be a bell, not a wake-up."""
     if phase.current() != "night":
         return
     from day.state import get_anchor_times
@@ -89,6 +97,7 @@ async def _check_wake_alarm(send_fn) -> None:
         return
     await notify.deliver("critical", "Пора вставать.", send_fn, source="alarm")
     save_meta(fired_key, "1")
+    save_meta("display_alarm_active", "1")
 
 
 async def _check_evening_negotiation(send_fn) -> None:
