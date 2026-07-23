@@ -28,7 +28,12 @@ _RESET_STATEMENTS = [
     "UPDATE day_phase_state SET phase='night' WHERE id=1",
     "UPDATE task_sessions SET status='cancelled' WHERE status IN "
     "('active','paused','waiting_user','waiting_dependency')",
-    "DELETE FROM rubedo_queue WHERE status IN ('pending','running')",
+    # queue_list() (no status filter) returns everything except
+    # done/cancelled -- a leftover 'failed' row from an earlier test
+    # file is enough to make "is the queue empty?" checks (idle-agenda's
+    # trigger gate) see it as non-empty. No test needs a queue row to
+    # survive across test boundaries, so this clears unconditionally.
+    "DELETE FROM rubedo_queue",
     "UPDATE hanging_questions SET status='reset' WHERE status='pending'",
     "DELETE FROM notification_bundle WHERE delivered_at IS NULL",
     "DELETE FROM day_tasks",
@@ -51,6 +56,11 @@ _RESET_STATEMENTS = [
     # every test (and every scratchpad smoke script) that runs after.
     "DELETE FROM meta WHERE key='autonomy_frozen'",
     "DELETE FROM meta WHERE key='queue_paused'",
+    # tests/test_idle_agenda.py leaves wishes behind otherwise -- a
+    # leftover active wish silently changes which idea day/agenda.py
+    # reaches for in a later, unrelated test.
+    "DELETE FROM wishes",
+    "DELETE FROM meta WHERE key LIKE 'idle_agenda_%'",
 ]
 
 

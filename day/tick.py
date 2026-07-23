@@ -179,6 +179,23 @@ async def _check_health_sweep(send_fn) -> None:
         await notify.deliver("critical", text, send_fn, source="health_sweep")
 
 
+async def _check_idle_agenda(send_fn) -> None:
+    """Idle-agenda (§6, stage 9.4) — only when there's truly nothing
+    else going on: no active sessions, an empty rubedo_queue, and the
+    day phase isn't night. day/agenda.py owns its own cooldowns from
+    here on; this is just the trigger gate."""
+    if phase.current() == "night":
+        return
+    import agent.sessions as sessions
+    if sessions.list_active():
+        return
+    from memory.db import queue_list
+    if queue_list():
+        return
+    import day.agenda as agenda
+    await agenda.run(send_fn)
+
+
 async def run_day_tick(send_fn) -> None:
     """One tick. Every check is idempotent — safe to call repeatedly
     (e.g. once a minute) without double-firing anything. `send_fn` is
@@ -193,3 +210,4 @@ async def run_day_tick(send_fn) -> None:
     await _check_health_sweep(send_fn)
     await pool.run_tick(send_fn)
     await run_queue_tick(send_fn)
+    await _check_idle_agenda(send_fn)
