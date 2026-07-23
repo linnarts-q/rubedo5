@@ -16,6 +16,15 @@ Severities:
                future policy may treat it differently (e.g. a channel-
                specific narrower window) without call sites changing.
 
+The techspec (§7) names these critical/important/routine — that
+naming was never literally implemented; this module has always used
+critical/normal/low instead (a deliberate, already-tested adaptation
+made when §7 first landed). Map spec -> code: important -> normal,
+routine -> low. This has already tripped two call sites that used the
+spec's own words verbatim (agent/crash_recovery.py, stage 7.5; the
+9.5 reminders port) — see CLAUDE.md for the one-line table so a third
+call site doesn't quietly pass "important" and get bundled forever.
+
 The current policy is "critical-only" whenever ANY of:
     - day phase (day/phase.py) is "night"
     - today is a day-off (day_state.is_dayoff) — day-off is a PARALLEL
