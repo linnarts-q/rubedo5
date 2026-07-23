@@ -7,9 +7,8 @@ from agent.tool_categories import CATEGORY_NAMES
 
 log = logging.getLogger("rubedo.classifier")
 
-_VALID_ROUTES = {"skill", "simple", "deep", "command"}
+_VALID_ROUTES = {"simple", "deep", "command"}
 _VALID_CONTEXTS = {"task", "plan", "info", "chat", "emotional", "urgent", "day_review"}
-_VALID_SKILLS = {"weather", "reminder", "system", "logs", "music", "news"}
 _VALID_CATEGORIES = set(CATEGORY_NAMES)
 
 _CATEGORY_DESCRIPTIONS = """Tool categories (pick every one the message plausibly needs — §13, over-including is cheap, missing one isn't):
@@ -28,18 +27,11 @@ _CATEGORY_DESCRIPTIONS = """Tool categories (pick every one the message plausibl
 _CLASSIFY = f"""Classify the user message. Return strictly JSON (no markdown).
 
 Routes:
-- skill: deterministic action matching an available skill topic
-- simple: regular conversation, quick answer, file/code/process work
+- simple: regular conversation, quick answer, file/code/process work,
+  weather/music/news requests (all have dedicated tools — no separate
+  skill route, just load the `web`/`media` category like anything else)
 - deep: complex multi-step task requiring planning (rarely used)
 - command: ONLY messages starting with /
-
-Available skills:
-- weather: weather, forecast, temperature outside
-- reminder: reminders, timers, \"remind me in/at...\"
-- system: ip-address, cpu/ram/disk load, ssh-key, system metrics ONLY
-- logs: ONLY the raw service log file ("дай лог-файл", "скинь log", "журнал"). Requests like "последние итерации", "трейс", "что ты делала", "что было" must go to `simple` — the agent has a dedicated `iterations_recent` tool for them, the logs skill would just dump the generic logfile.
-- music: music, playlist, pause, next track
-- news: news, what's happening, what's new, latest news
 
 Context types:
 - task: user wants something done / executed
@@ -51,15 +43,12 @@ Context types:
 - day_review: reflecting on the day, evening review, how was the day
 
 Routing rules:
-- \"show metrics / cpu load / how much memory / system info\" → skill: system
-- \"how many files in X / what's in directory / list files / show files\" → simple (use file_list tool, NOT skill: system)
-- \"delete/create/read file\", \"run process/program\", \"write code\" → simple (NOT system)
+- \"how many files in X / what's in directory / list files / show files\" → simple (use file_list tool)
+- \"delete/create/read file\", \"run process/program\", \"write code\" → simple
 - command route ONLY if message starts with /
-- \"add/delete/clear/update/edit task\", \"list tasks\", \"change time in task\" → simple (NOT reminder)
-- reminder skill ONLY when user explicitly says \"напомни\", \"напоминание\", \"remind me\", \"таймер\", \"через N минут/часов\"
+- \"add/delete/clear/update/edit task\", \"list tasks\", \"change time in task\", \"напомни\" → simple (dedicated task/reminder tools)
 - messages starting with [голосовое] are voice transcriptions — classify by the transcribed content, not the prefix
 - Choose context based on the intent behind the message
-- Rule of thumb for `system` skill: if user asks a question that needs CURRENT live values of CPU/RAM/disk/temperature/network → skill:system. Anything else file/directory/process/code-related → simple (the agent has dedicated tools).
 
 missing_info field: populate ONLY when critical info is missing and cannot be inferred.
 Max 5 questions in Russian.
@@ -72,7 +61,7 @@ Do NOT populate for: task management, reminders, chat, commands, any request wit
 For route=chat/emotional with no concrete action, tool_categories can be empty — those routes get no tools regardless (§11).
 
 Return JSON only:
-{{\"route\": \"skill|simple|deep|command\", \"context\": \"task|plan|info|chat|emotional|urgent|day_review\", \"intent\": \"brief description in Russian\", \"skill\": \"weather|reminder|system|logs|music|news|null\", \"missing_info\": [], \"tool_categories\": []}}
+{{\"route\": \"simple|deep|command\", \"context\": \"task|plan|info|chat|emotional|urgent|day_review\", \"intent\": \"brief description in Russian\", \"missing_info\": [], \"tool_categories\": []}}
 """
 
 
@@ -109,10 +98,6 @@ async def classify(message: str, history: list | None = None) -> dict:
         if result.get("context") not in _VALID_CONTEXTS:
             log.warning(f"[classify] invalid context={result.get('context')!r}, defaulting chat")
             result["context"] = "chat"
-        skill = result.get("skill")
-        if skill and skill not in _VALID_SKILLS:
-            log.warning(f"[classify] invalid skill={skill!r}, clearing")
-            result["skill"] = None
         if not result.get("intent"):
             result["intent"] = message[:60]
         if not isinstance(result.get("missing_info"), list):
@@ -139,13 +124,13 @@ async def classify(message: str, history: list | None = None) -> dict:
 
         log.info(
             f"[classify] «{message[:60]}» → route={result.get('route')} "
-            f"context={result.get('context')} skill={result.get('skill')} | {result.get('intent', '')[:60]}"
+            f"context={result.get('context')} | {result.get('intent', '')[:60]}"
         )
         return result
     except Exception as e:
         log.warning(f"Classifier failed ({type(e).__name__}): {e}, defaulting simple/chat")
         return {
-            "route": "simple", "context": "chat", "intent": message, "skill": None,
+            "route": "simple", "context": "chat", "intent": message,
             "missing_info": [], "tool_categories": [],
         }
 
