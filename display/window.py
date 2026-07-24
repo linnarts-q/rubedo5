@@ -46,8 +46,6 @@ from config import ENABLE_DISPLAY, DISPLAY_W, DISPLAY_H
 
 log = logging.getLogger("rubedo.display")
 
-_ALARM_ACTIVE_FILE = Path("data/.alarm_active")
-_ALARM_DISMISSED_FILE = Path("data/.alarm_dismissed")
 _PRE_ALARM_WAKE_FILE = Path("data/.pre_alarm_wake")
 _SLEEP_REQUEST_FILE = Path("data/.sleep_request")
 _RESTART_DISPLAY_FILE = Path("data/.restart_display")
@@ -179,6 +177,15 @@ def _current_background_path() -> str:
     except Exception as e:
         log.warning(f"Background meta read failed: {e}")
         return ""
+
+
+def _current_alarm_active() -> bool:
+    try:
+        from memory.db import load_meta
+        return load_meta("display_alarm_active") == "1"
+    except Exception as e:
+        log.warning(f"Alarm-active meta read failed: {e}")
+        return False
 
 
 def _save_logs(logs: list) -> None:
@@ -996,10 +1003,15 @@ def _run_pygame() -> None:
                 _screen_on()
                 log.info("Sleep mode exited (remote /sleep_off)")
 
-            # Alarm activity — bus event flags merge with file polling.
+            # Alarm activity (§19, stage 9.5's bridge) — day/tick.py's
+            # _check_wake_alarm sets display_alarm_active in meta, not
+            # a file (rubedo4's _ALARM_ACTIVE_FILE/_ALARM_DISMISSED_FILE
+            # were never written by day-engine 5.0's actual wake-alarm
+            # design, which wakes through Postgres + notify.deliver()
+            # rather than a file the display process could poll).
             state.pop("bus_signal_alarm_active", False)
             state.pop("bus_signal_alarm_dismissed", False)
-            if _ALARM_ACTIVE_FILE.exists() and not _ALARM_DISMISSED_FILE.exists():
+            if _current_alarm_active():
                 if not state["alarm_mode"]:
                     state["alarm_mode"] = True
                     state["alarm_tap_count"] = 0
@@ -1138,10 +1150,18 @@ def _run_pygame() -> None:
                         except Exception as e:
                             log.debug(f"AlarmDismissed publish skipped: {e}")
                         try:
-                            _ALARM_DISMISSED_FILE.parent.mkdir(parents=True, exist_ok=True)
-                            _ALARM_DISMISSED_FILE.write_text("1")
+                            # Clears the screen immediately regardless of
+                            # whether interface/telegram.py is up to
+                            # hear the bus event above — that process is
+                            # still the one that turns this into the
+                            # actual night -> morning phase transition
+                            # (§17), but the display shouldn't stay
+                            # stuck showing the alarm just because it
+                            # happened to be down at that moment.
+                            from memory.db import save_meta
+                            save_meta("display_alarm_active", "0")
                         except Exception as e:
-                            log.error(f"Could not write alarm dismissed: {e}")
+                            log.error(f"Could not clear alarm-active flag: {e}")
                         state["alarm_mode"] = False
                         state["alarm_tap_count"] = 0
                         log.info("Alarm dismissed by user")

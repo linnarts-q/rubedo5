@@ -71,9 +71,17 @@ async def _check_wake_alarm(send_fn) -> None:
     level night-phase policy lets through at all (agent/notify.py).
     Critical is always deliverable (never bundled) but notify.deliver()
     still has to actually be called, or the alarm is computed and
-    marked fired without ever reaching the owner. Confirming wake-up
-    (night -> morning) happens separately, on the owner's next real
-    message (agent/controller.py), not here — this only sounds it."""
+    marked fired without ever reaching the owner.
+
+    Also arms the physical display's alarm screen (§19, stage 9.5's
+    bridge — display_alarm_active in meta, polled by display/window.py
+    every second, replacing the dead file-flag rubedo4 used). Confirming
+    wake-up (night -> morning) happens two ways from here: on the
+    owner's next real message (agent/controller.py, unchanged), or on
+    the physical screen's tap-to-dismiss, which publishes AlarmDismissed
+    on the bus for interface/telegram.py to turn into the same
+    phase.on_wake_confirmed() call (§17) — a bare screen with no return
+    path back to the phase machine would just be a bell, not a wake-up."""
     if phase.current() != "night":
         return
     from day.state import get_anchor_times
@@ -89,6 +97,7 @@ async def _check_wake_alarm(send_fn) -> None:
         return
     await notify.deliver("critical", "Пора вставать.", send_fn, source="alarm")
     save_meta(fired_key, "1")
+    save_meta("display_alarm_active", "1")
 
 
 async def _check_evening_negotiation(send_fn) -> None:
@@ -142,6 +151,80 @@ async def _check_wrapup(send_fn) -> None:
     await wrapup.run_wrapup(send_fn)
 
 
+async def _check_health_sweep(send_fn) -> None:
+    """workspace/health_sweep.py (§6, pulled forward to stage 9.3) is
+    her own editable file, not core — a broken edit must never take
+    the tick down with it. A plain cached import (not a per-tick
+    re-exec from disk) on purpose: her own per-metric alert cooldown
+    lives in that module's process-lifetime state, and reloading fresh
+    every 60 seconds would silently reset it every tick. A successful
+    import stays cached for the rest of this process's life (edits
+    need a restart to take effect, same as any other code change); a
+    failed import is retried on every following tick automatically
+    (Python doesn't cache a module that failed mid-exec) — so once she
+    fixes it, it picks back up on its own, no restart needed for that
+    direction. Any failure at all — import-time or from check() itself
+    — is reported back to her at "normal" severity so she can fix it
+    via the reflexive cycle, and the tick moves on regardless. A real
+    threshold breach is "critical" (§7) — it has to break through
+    night/day-off/quiet-mode (С16), the whole reason this got pulled
+    forward ahead of the rest of §6."""
+    import importlib
+    from agent import notify
+
+    try:
+        health_sweep = importlib.import_module("workspace.health_sweep")
+        alerts = await health_sweep.check()
+    except Exception as e:
+        log.error(f"health_sweep failed (her own edit broke it?): {e}")
+        await notify.deliver(
+            "normal", f"health_sweep упал: {e}. Почини через рефлексию.", send_fn,
+            source="health_sweep",
+        )
+        return
+
+    if alerts:
+        text = "Показатели системы вышли за пределы: " + ", ".join(alerts)
+        await notify.deliver("critical", text, send_fn, source="health_sweep")
+
+
+async def _check_reminders(send_fn) -> None:
+    """Reminders (stage 9.5 — ported from rubedo4's skills/reminder.py
+    + interface/telegram.py's own _reminder_loop, which fired them
+    directly rather than through any severity gate). "Обычные" per the
+    spec's own §7 wording (важные/important) maps to "normal" here —
+    see CLAUDE.md's mapping table, the actual implemented tier names
+    aren't the spec's literal words."""
+    from memory.db import get_due_reminders, mark_reminder_done, save_event
+    from agent import notify
+
+    for r in get_due_reminders():
+        await notify.deliver("normal", f"⏰ {r['text']}", send_fn, source="reminder")
+        mark_reminder_done(r["id"])
+        save_event(
+            session_id=r.get("session_id") or "lin",
+            content=f"Отправила напоминание: {r['text']}",
+            priority=2, category="proactive",
+        )
+
+
+async def _check_idle_agenda(send_fn) -> None:
+    """Idle-agenda (§6, stage 9.4) — only when there's truly nothing
+    else going on: no active sessions, an empty rubedo_queue, and the
+    day phase isn't night. day/agenda.py owns its own cooldowns from
+    here on; this is just the trigger gate."""
+    if phase.current() == "night":
+        return
+    import agent.sessions as sessions
+    if sessions.list_active():
+        return
+    from memory.db import queue_list
+    if queue_list():
+        return
+    import day.agenda as agenda
+    await agenda.run(send_fn)
+
+
 async def run_day_tick(send_fn) -> None:
     """One tick. Every check is idempotent — safe to call repeatedly
     (e.g. once a minute) without double-firing anything. `send_fn` is
@@ -153,5 +236,8 @@ async def run_day_tick(send_fn) -> None:
     await _check_briefing(send_fn)
     await _check_wrapup(send_fn)
     await _check_evening_negotiation(send_fn)
+    await _check_health_sweep(send_fn)
+    await _check_reminders(send_fn)
     await pool.run_tick(send_fn)
     await run_queue_tick(send_fn)
+    await _check_idle_agenda(send_fn)

@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: rubedo
+          POSTGRES_PASSWORD: rubedo
+          POSTGRES_DB: rubedo5
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U rubedo -d rubedo5"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://rubedo:rubedo@localhost:5432/rubedo5
+      TELEGRAM_API_ID: "1"
+      TELEGRAM_API_HASH: "x"
+      OWNER_USER_ID: "1"
+      OPENROUTER_API_KEYS: "x"
+      GROQ_API_KEYS: "x"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        # SETUPTOOLS_USE_DISTUTILS=stdlib: telethon's pyaes dependency
+        # hasn't been updated in years and its setup.py breaks against
+        # modern setuptools' own vendored distutils -- this tells
+        # setuptools to fall back to the stdlib copy instead, which
+        # pyaes's old-style build still works against.
+        run: SETUPTOOLS_USE_DISTUTILS=stdlib pip install -r requirements-dev.txt
+
+      - name: pytest
+        run: pytest

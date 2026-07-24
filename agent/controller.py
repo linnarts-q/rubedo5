@@ -1,7 +1,6 @@
 from __future__ import annotations
 import asyncio
 import logging
-import os
 import re
 from datetime import datetime
 from config import (
@@ -471,19 +470,15 @@ async def handle_message(
             try:
                 _pend = _cj_imp.loads(_pending_cl_raw)
             except Exception:
-                _pend = {"text": _pending_cl_raw, "route": "simple", "skill": None}
+                _pend = {"text": _pending_cl_raw, "route": "simple"}
             _orig_text = _pend.get("text", "")
-            _orig_skill = _pend.get("skill") or ""
             if not skip_save_user:
                 save_message(session_id, "user", text)
                 _cl_answer_saved = True
             from agent.classifier import extract_clarification_answer as _extract_cl
             _questions = _pend.get("questions", [])
             _extracted = await _extract_cl(_questions, text)
-            if _orig_skill == "weather":
-                text = f"Погода в {_extracted}: {_orig_text}"
-            else:
-                text = f"{_orig_text}\n(Уточнение: {_extracted})"
+            text = f"{_orig_text}\n(Уточнение: {_extracted})"
 
     if _is_ack(text):
         log.info(f"[{session_id}] ack-only message, skipping reply")
@@ -508,11 +503,9 @@ async def handle_message(
         route = "simple"
 
     # Frozen (stop-phrase armed, techspec §15): keep talking, but no
-    # autonomous action — skill dispatch and tool access are both off
-    # until the resume phrase is seen.
+    # autonomous action — tool access is off (enforced later via
+    # _no_tools) until the resume phrase is seen.
     _frozen = stopword.is_frozen()
-    if _frozen and route == "skill":
-        route = "simple"
 
     log.info(f"[{session_id}] route={route} context={context_type} intent={intent[:60]}")
     audit.route(route=route, context_type=context_type, intent=intent)
@@ -524,27 +517,19 @@ async def handle_message(
     _missing_info = route_info.get("missing_info", [])
     if _missing_info and route != "command" and not load_meta("pending_clarification_intent"):
         import json as _cj_gate
-        from config import DEFAULT_CITY as _dc
-        if route == "skill" and route_info.get("skill") == "weather" and _dc:
-            _missing_info = [
-                q for q in _missing_info
-                if "город" not in q.lower() and "city" not in q.lower()
-            ]
-        if _missing_info:
-            _q = (
-                "\n".join(f"— {q}" for q in _missing_info)
-                if len(_missing_info) > 1
-                else _missing_info[0]
-            )
-            save_meta("pending_clarification_intent", _cj_gate.dumps({
-                "text": text, "route": route, "skill": route_info.get("skill"),
-                "questions": _missing_info,
-            }))
-            save_meta("pending_clarification_armed_at", datetime.now().isoformat())
-            await send_fn(_q)
-            save_message(session_id, "assistant", _q)
-            await bus_client.publish(AgentReplied(session_id=session_id))
-            return
+        _q = (
+            "\n".join(f"— {q}" for q in _missing_info)
+            if len(_missing_info) > 1
+            else _missing_info[0]
+        )
+        save_meta("pending_clarification_intent", _cj_gate.dumps({
+            "text": text, "route": route, "questions": _missing_info,
+        }))
+        save_meta("pending_clarification_armed_at", datetime.now().isoformat())
+        await send_fn(_q)
+        save_message(session_id, "assistant", _q)
+        await bus_client.publish(AgentReplied(session_id=session_id))
+        return
 
     if route == "command":
         reply = await _handle_command(text, session_id)
@@ -554,34 +539,15 @@ async def handle_message(
         return
 
     if route == "skill":
-        try:
-            import skills  # noqa: F401
-            from skills.registry import dispatch as _dispatch, match_skill as _match
-        except ImportError:
-            # skills/ isn't ported yet at this rework stage — fall back
-            # to the normal tool-loop path rather than crash the turn.
-            log.debug("skills package not available yet, routing as simple")
-            route = "simple"
-        else:
-            skill_name = route_info.get("skill") or ""
-            if not skill_name or skill_name == "null":
-                skill_name = _match(text) or ""
-            if skill_name:
-                reply = await _dispatch(skill_name, text, session_id)
-                save_message(session_id, "assistant", reply)
-                if reply.startswith("FILE:") and send_file_fn:
-                    file_path = reply[5:]
-                    if os.path.exists(file_path):
-                        await send_file_fn(file_path)
-                    else:
-                        await send_fn(f"Файл не найден: {file_path}")
-                else:
-                    await send_fn(reply)
-                asyncio.create_task(_post_process(session_id, text, reply, context_type))
-                await bus_client.publish(AgentFinished(session_id=session_id, reply=reply[:100]))
-                await bus_client.publish(AgentReplied(session_id=session_id))
-                return
-            route = "simple"
+        # Stage 9.5 folded weather/music/news into ordinary tools
+        # (agent/tools/weather.py etc, §13 categories) rather than
+        # porting rubedo4's separate skills/registry.py dispatch route
+        # — they're reachable through the normal tool-calling path
+        # below like anything else now. This guard only remains for a
+        # stale classifier prompt/cache still emitting "skill"; the
+        # actual dispatch machinery (and its ImportError fallback) is
+        # gone, not degraded.
+        route = "simple"
 
     facts = load_facts(session_id, limit=5)
     events_raw = search_events(text, limit=3)

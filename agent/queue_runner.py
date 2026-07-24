@@ -159,5 +159,6 @@ async def run_queue_tick(send_fn=None) -> None:
     if s["status"] != "active":
         return  # waiting_dependency — claimed, a later tick will resume it
 
-    sessions.log_decision(s["id"], "initiative", f"взяла из очереди: {task['title']}")
+    _why = f" — {task['description']}" if task.get("description") else ""
+    sessions.log_decision(s["id"], "initiative", f"взяла из очереди: {task['title']}{_why}")
     await _execute(task, s, [{"role": "user", "content": task["description"] or task["title"]}], send_fn)

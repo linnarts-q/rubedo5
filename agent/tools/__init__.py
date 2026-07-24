@@ -44,6 +44,16 @@ from agent.tools.prflow import (  # noqa: E402  (re-export)
 from agent.tools.display import (  # noqa: E402  (re-export)
     set_background,
 )
+from agent.tools.music import (  # noqa: E402  (re-export)
+    music_play, music_pause, music_resume, music_stop, music_next,
+    music_louder, music_quieter,
+)
+from agent.tools.news import (  # noqa: E402  (re-export)
+    news,
+)
+from agent.tools.tts import (  # noqa: E402  (re-export)
+    speak,
+)
 
 log = logging.getLogger("rubedo.tools")
 
@@ -1141,6 +1151,16 @@ TOOLS_MAP: dict[str, callable] = {
     "weather": get_weather,
     "screenshot": take_screenshot,
     "research": research_task,
+    "news": news,
+    # music.*
+    "music_play": music_play,
+    "music_pause": music_pause,
+    "music_resume": music_resume,
+    "music_stop": music_stop,
+    "music_next": music_next,
+    "music_louder": music_louder,
+    "music_quieter": music_quieter,
+    "speak": speak,
     # pool.*
     "pool_add": add_pool_task,
     "pool_list": list_pool_tasks,
@@ -1475,6 +1495,48 @@ TOOLS_SCHEMA: list[dict] = [
             "days": {"type": "integer", "default": 3},
             "date_ref": {"type": "string", "default": ""},
         }, "required": []}}},
+    {"type": "function", "function": {
+        "name": "news",
+        "description": "Последние новости, опционально по конкретному городу/региону (по умолчанию — NEWS_LOCATION)",
+        "parameters": {"type": "object", "properties": {
+            "location": {"type": "string", "default": ""},
+        }, "required": []}}},
+    {"type": "function", "function": {
+        "name": "music_play",
+        "description": "Включить музыку. Пустой аргумент — продолжить сохранённый плейлист (или MUSIC_PLAYLIST); ссылка — играть её.",
+        "parameters": {"type": "object", "properties": {
+            "url_or_query": {"type": "string", "default": ""},
+        }, "required": []}}},
+    {"type": "function", "function": {
+        "name": "music_pause",
+        "description": "Поставить музыку на паузу",
+        "parameters": {"type": "object", "properties": {}, "required": []}}},
+    {"type": "function", "function": {
+        "name": "music_resume",
+        "description": "Продолжить воспроизведение после паузы",
+        "parameters": {"type": "object", "properties": {}, "required": []}}},
+    {"type": "function", "function": {
+        "name": "music_stop",
+        "description": "Остановить музыку",
+        "parameters": {"type": "object", "properties": {}, "required": []}}},
+    {"type": "function", "function": {
+        "name": "music_next",
+        "description": "Следующий трек",
+        "parameters": {"type": "object", "properties": {}, "required": []}}},
+    {"type": "function", "function": {
+        "name": "music_louder",
+        "description": "Сделать музыку громче",
+        "parameters": {"type": "object", "properties": {}, "required": []}}},
+    {"type": "function", "function": {
+        "name": "music_quieter",
+        "description": "Сделать музыку тише",
+        "parameters": {"type": "object", "properties": {}, "required": []}}},
+    {"type": "function", "function": {
+        "name": "speak",
+        "description": "Сказать текст вслух через колонку мини-ПК (TTS)",
+        "parameters": {"type": "object", "properties": {
+            "text": {"type": "string"},
+        }, "required": ["text"]}}},
     {"type": "function", "function": {
         "name": "note_list",
         "description": "Показать список заметок",

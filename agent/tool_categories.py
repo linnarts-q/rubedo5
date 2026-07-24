@@ -54,7 +54,11 @@ CATEGORIES: dict[str, list[str]] = {
     ],
     "web": [
         "web_search", "web_screenshot", "web_content", "navigate", "calculate",
-        "weather", "research",
+        "weather", "research", "news",
+    ],
+    "media": [
+        "music_play", "music_pause", "music_resume", "music_stop",
+        "music_next", "music_louder", "music_quieter", "speak",
     ],
     "system": [
         "system_info", "system_uptime", "system_volume", "system_env_set",
